@@ -18,6 +18,7 @@ const DRIVER_MOTORCYCLE_COUNT = 40;
 const DRIVER_SPEED_KPH = 25;
 const DRIVER_SPEED_MPS = (DRIVER_SPEED_KPH * 1000) / 3600;
 const DRIVER_RECONCILE_INTERVAL_MS = 2500;
+const MOCK_DRIVER_RANDOM_SEED = 20260522;
 const MATCH_DEFAULT_RADIUS_METERS = 3000;
 const MATCH_EXPANDED_RADIUS_METERS = 5000;
 const MATCH_TRAFFIC_FALLBACK_RATIO = 0.72;
@@ -39,6 +40,7 @@ const LANDMARK_TOURISM_REGEX = "attraction|museum|hotel";
 const LANDMARK_SEARCH_RADIUS_METERS = 900;
 const USER_POINT_NODE_ID = "__user_point__";
 const DROPOFF_POINT_NODE_ID = "__dropoff_point__";
+let mockDriverRandomState = MOCK_DRIVER_RANDOM_SEED;
 
 const statusText = document.getElementById("status-text");
 const timeText = document.getElementById("time-text");
@@ -1413,7 +1415,7 @@ function buildLandmarks(overpassData) {
     }
   }
 
-  state.landmarks = landmarks.sort((left, right) => right.weight - left.weight);
+  state.landmarks = landmarks.sort(compareLandmarksForMockData);
 }
 
 function loadLandmarksFromPayload(landmarks) {
@@ -1428,7 +1430,26 @@ function loadLandmarksFromPayload(landmarks) {
       lng: Number(landmark.lng),
       nodeId: String(landmark.nodeId || landmark.node_id)
     }))
-    .sort((left, right) => right.weight - left.weight);
+    .sort(compareLandmarksForMockData);
+}
+
+function compareLandmarksForMockData(left, right) {
+  const weightDifference = right.weight - left.weight;
+  if (weightDifference !== 0) {
+    return weightDifference;
+  }
+
+  const leftKey = `${left.category}|${left.nodeId}|${left.id}|${left.name}`;
+  const rightKey = `${right.category}|${right.nodeId}|${right.id}|${right.name}`;
+  if (leftKey < rightKey) {
+    return -1;
+  }
+
+  if (leftKey > rightKey) {
+    return 1;
+  }
+
+  return 0;
 }
 
 function drawLandmarks() {
@@ -2784,6 +2805,7 @@ function getElementCoordinates(element) {
 }
 
 function initializeDrivers() {
+  resetMockDriverRandomState();
   state.drivers = [];
   driverLayer.clearLayers();
 
@@ -3306,7 +3328,7 @@ function pickWeightedLandmark(excludeNodeId = null) {
   }
 
   const totalWeight = candidates.reduce((sum, landmark) => sum + landmark.weight, 0);
-  let threshold = Math.random() * totalWeight;
+  let threshold = getMockDriverRandomValue() * totalWeight;
 
   for (const landmark of candidates) {
     threshold -= landmark.weight;
@@ -3453,6 +3475,15 @@ function clampValue(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
+function resetMockDriverRandomState() {
+  mockDriverRandomState = MOCK_DRIVER_RANDOM_SEED;
+}
+
+function getMockDriverRandomValue() {
+  mockDriverRandomState = (Math.imul(mockDriverRandomState, 1664525) + 1013904223) >>> 0;
+  return mockDriverRandomState / 0x100000000;
+}
+
 function getSeededUnitValue(seed) {
   const value = Math.sin(seed * 12.9898) * 43758.5453;
   return value - Math.floor(value);
@@ -3513,7 +3544,7 @@ function describeMovementBehavior(driver, movementScore) {
 
 function shuffleArray(items) {
   for (let index = items.length - 1; index > 0; index -= 1) {
-    const swapIndex = Math.floor(Math.random() * (index + 1));
+    const swapIndex = Math.floor(getMockDriverRandomValue() * (index + 1));
     [items[index], items[swapIndex]] = [items[swapIndex], items[index]];
   }
 
