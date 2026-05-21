@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SaktoGov3</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Source+Sans+3:wght@400;600;700&display=swap" rel="stylesheet">
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  >
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body class="mode-selection-open">
+  <div id="entry-overlay" class="entry-overlay" role="dialog" aria-modal="true" aria-labelledby="entry-title">
+    <div class="entry-card">
+      <p class="eyebrow">Choose Access Mode</p>
+      <h2 id="entry-title">How do you want to open the app?</h2>
+      <p class="entry-copy">
+        User mode opens a phone-style layout for passenger interaction.
+        Admin mode opens the full web layout for monitoring and management.
+      </p>
+      <div class="entry-actions">
+        <button id="enter-user-btn" class="action-btn" type="button">Enter as User</button>
+        <button id="enter-admin-btn" class="ghost-btn" type="button">Enter as Admin</button>
+      </div>
+    </div>
+  </div>
+  <div id="loading-overlay" class="loading-overlay" hidden aria-live="polite" aria-busy="true">
+    <div class="loading-card">
+      <div class="loading-spinner" aria-hidden="true"></div>
+      <strong>Loading map system...</strong>
+      <small id="loading-status-text" class="detail-text">Preparing the map, roads, weather, and driver simulation.</small>
+    </div>
+  </div>
+  <div id="desktop-shell-host" class="desktop-shell-host" hidden></div>
+  <div class="phone-frame" aria-hidden="true">
+    <div class="phone-shell" role="region" aria-label="Mobile phone viewport">
+      <div class="phone-notch" aria-hidden="true"></div>
+      <div class="phone-screen">
+        <div class="shell">
+    <aside class="panel">
+      <nav class="mobile-panel-nav" aria-label="User panel sections">
+        <button id="tab-request-btn" class="mobile-panel-tab is-active" type="button" data-user-panel-tab="request">Request</button>
+        <button id="tab-driver-btn" class="mobile-panel-tab" type="button" data-user-panel-tab="driver">Driver</button>
+        <button id="tab-trip-btn" class="mobile-panel-tab" type="button" data-user-panel-tab="trip">Trip</button>
+        <button id="tab-more-btn" class="mobile-panel-tab" type="button" data-user-panel-tab="more">More</button>
+      </nav>
+
+      <!-- Intro copy removed per request; UI will present strict step flow -->
+
+      <div class="control-group" data-mobile-section="request">
+        <div class="flow-steps" aria-label="Ride request steps">
+          <div id="step-vehicle" class="flow-step">
+            <div class="flow-step__summary">
+              <span class="flow-step__number">1</span>
+              <span class="flow-step__label">Choose Ride</span>
+            </div>
+            <div class="flow-step__content">
+              <div class="ride-type-picker" aria-label="Choose ride type">
+                <button id="choose-car-btn" class="ghost-btn ride-type-btn" type="button" aria-pressed="false">
+                  <span class="ride-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M5 14.25L6.1 10.9A2 2 0 0 1 8 9.5h8a2 2 0 0 1 1.9 1.4L19 14.25V17H5v-2.75Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+                      <path d="M7.25 9.5L9 7.25h6L17.25 9.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                      <circle cx="8" cy="17" r="1.5" stroke="currentColor" stroke-width="1.6"/>
+                      <circle cx="16" cy="17" r="1.5" stroke="currentColor" stroke-width="1.6"/>
+                    </svg>
+                  </span>
+                  <span class="ride-label">Car</span>
+                </button>
+                <button id="choose-motorcycle-btn" class="ghost-btn ride-type-btn" type="button" aria-pressed="false">
+                  <span class="ride-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <circle cx="6.5" cy="16.5" r="1.5" stroke="currentColor" stroke-width="1.6"/>
+                      <circle cx="17.5" cy="16.5" r="1.5" stroke="currentColor" stroke-width="1.6"/>
+                      <path d="M6.5 16.5L9 12.5H12.6L15.2 14.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                      <path d="M13.2 9.2L15.2 10.3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+                      <path d="M11.2 11.5H14.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+                    </svg>
+                  </span>
+                  <span class="ride-label">Motorcycle</span>
+                </button>
+              </div>
+            </div>
+          </div>
+          <div id="step-pickup" class="flow-step">
+            <span class="flow-step__number">2</span>
+            <span class="flow-step__label">Set Pickup</span>
+          </div>
+          <div id="step-dropoff" class="flow-step">
+            <span class="flow-step__number">3</span>
+            <span class="flow-step__label">Set Drop-off</span>
+          </div>
+          <div id="step-review" class="flow-step">
+            <span class="flow-step__number">4</span>
+            <span class="flow-step__label">Review Driver</span>
+          </div>
+        </div>
+
+        <small id="ride-type-text" class="detail-text"></small>
+        <strong id="request-mode-text"></strong>
+        <small id="request-hint-text" class="detail-text"></small>
+        <small id="selection-guide-text" class="detail-text"></small>
+        <div class="button-row">
+          <button id="pick-me-btn" class="action-btn is-active" type="button">Set Pickup</button>
+          <button id="find-driver-btn" class="ghost-btn" type="button">Set Drop-off</button>
+          <button id="reset-btn" class="ghost-btn" type="button">Reset</button>
+        </div>
+      </div>
+
+      <div class="control-group offer-card" data-mobile-section="driver">
+        <p class="control-group__label">Suggested Driver</p>
+        <strong id="offer-title-text">Choose pickup and drop-off first</strong>
+        <small id="offer-detail-text" class="detail-text">The suggested driver profile will appear here before dispatch.</small>
+        <div class="offer-summary" aria-label="Driver match summary">
+          <div class="offer-summary__item">
+            <span class="offer-summary__label">Match score</span>
+            <strong id="offer-score-text">--</strong>
+          </div>
+          <div class="offer-summary__item">
+            <span class="offer-summary__label">Pickup ETA</span>
+            <strong id="offer-eta-text">--</strong>
+          </div>
+          <div class="offer-summary__item">
+            <span class="offer-summary__label">Baseline driver</span>
+            <strong id="offer-baseline-text">--</strong>
+          </div>
+          <div class="offer-summary__item">
+            <span class="offer-summary__label">Baseline distance</span>
+            <strong id="offer-baseline-distance-text">--</strong>
+          </div>
+        </div>
+        <div class="offer-reason-block">
+          <span class="offer-reason-block__label">Why this match</span>
+          <ul id="offer-reason-list" class="offer-reason-list"></ul>
+        </div>
+        <div class="button-row button-row--offer">
+          <button id="accept-driver-btn" class="action-btn" type="button">Accept Driver</button>
+          <button id="other-driver-btn" class="ghost-btn" type="button">Suggest Other Driver</button>
+          <button id="cancel-request-btn" class="ghost-btn" type="button">Cancel Request</button>
+        </div>
+      </div>
+
+      <div class="stats">
+        <div class="stat-card" data-mobile-tab="more">
+          <span class="stat-card__label">Status</span>
+          <strong id="status-text">Loading boundary and street network...</strong>
+        </div>
+        <div class="stat-card" data-mobile-tab="more">
+          <span class="stat-card__label">Olongapo Time</span>
+          <strong id="time-text">Loading local time...</strong>
+        </div>
+        <div class="stat-card" data-mobile-tab="more">
+          <span class="stat-card__label">Current Weather</span>
+          <strong id="weather-text">Loading weather...</strong>
+        </div>
+        <div class="stat-card" data-mobile-tab="trip">
+          <span class="stat-card__label">Pickup</span>
+          <strong id="point-a-text">Not selected</strong>
+          <small id="traffic-a-text" class="detail-text">Traffic: waiting for pickup selection</small>
+        </div>
+        <div class="stat-card" data-mobile-tab="trip">
+          <span class="stat-card__label">Drop-off</span>
+          <strong id="point-c-text">Not selected</strong>
+          <small id="traffic-c-text" class="detail-text">Traffic: waiting for drop-off selection</small>
+        </div>
+        <div class="stat-card" data-mobile-tab="driver">
+          <span class="stat-card__label">Driver</span>
+          <strong id="point-b-text">Waiting for driver suggestion</strong>
+          <small id="traffic-b-text" class="detail-text">Driver profile appears after pickup and drop-off are set</small>
+        </div>
+        <div class="stat-card" data-mobile-tab="trip">
+          <span class="stat-card__label">Ride Progress</span>
+          <strong id="route-text">Waiting for pickup and drop-off</strong>
+          <small id="route-traffic-text" class="detail-text">Route traffic: unavailable until a driver is accepted</small>
+        </div>
+        <div class="stat-card" data-mobile-tab="more">
+          <span class="stat-card__label">Driver Simulation</span>
+          <strong id="driver-summary-text">Preparing 100 drivers...</strong>
+          <small id="driver-breakdown-text" class="detail-text">60 cars, 40 motorcycles. Green = available, orange = going to passenger, red = on-trip, yellow = suggested or matched to you.</small>
+        </div>
+      </div>
+
+      
+    </aside>
+
+    <main class="map-stage">
+      <div id="map"></div>
+    </main>
+        </div>
+      </div>
+      <div class="home-indicator" aria-hidden="true"></div>
+    </div>
+  </div>
+
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+  <script src="./app.js"></script>
+</body>
+</html>

@@ -8,12 +8,13 @@ The project has:
 - a lightweight Python server in [app.py](/E:/SaktoGov3/app.py:1)
 - live data pulled from OpenStreetMap, Open-Meteo, and optionally TomTom Traffic
 
-This README is written so a teammate can copy the folder to another laptop and run it with minimal setup.
+This README is written so a teammate can copy the folder to another laptop or another PC and run it with minimal setup.
 
 ## Files
 
-- [app.py](/E:/SaktoGov3/app.py:1): serves the frontend and exposes `/api/*` endpoints for bootstrap, weather, routing, and best-driver lookup
+- [app.py](/E:/SaktoGov3/app.py:1): serves the frontend and exposes `/api/*` endpoints for bootstrap, weather, routing, and intelligent driver matching
 - [app.js](/E:/SaktoGov3/app.js:1): Leaflet map UI, driver simulation, browser-side fallback data loading, and optional TomTom traffic lookups
+- [passenger-driver.py](/E:/SaktoGov3/passenger-driver.py:1): Python intelligent passenger-driver matching, ranking, scoring, and explanation logic
 - [index.html](/E:/SaktoGov3/index.html:1): page structure
 - [styles.css](/E:/SaktoGov3/styles.css:1): styling
 
@@ -27,7 +28,7 @@ For the easiest setup on another device:
 
 No `npm install`, `pip install`, virtual environment, or database setup is required for the current version. The Python backend uses only the standard library.
 
-## Quick Start On Another Device
+## Quick Start On Another PC
 
 1. Copy or clone this project folder to the teammate's machine.
 2. Open a terminal in the project folder.
@@ -40,6 +41,27 @@ python app.py --port 8000
 4. Open `http://127.0.0.1:8000` in the browser.
 
 That is the recommended mode because the frontend will automatically use the Python backend when running on port `8000` or `8001`.
+
+## Full Setup On Another PC
+
+Use this if you want to set the project up from scratch on a different computer.
+
+1. Install Python 3.10 or newer.
+2. Copy the project folder to the other PC, or clone the repository there.
+3. Open PowerShell or Terminal in the project folder.
+4. Start the app with:
+
+```powershell
+python app.py --port 8000
+```
+
+5. Open the browser and go to:
+
+```text
+http://127.0.0.1:8000
+```
+
+If Python is not found, install it from python.org and make sure `python` is available in `PATH`.
 
 ## Share It To Other Devices On The Same Network
 
@@ -72,6 +94,16 @@ If teammates cannot connect:
 - allow Python through the Windows firewall on the host machine
 - confirm everyone is on the same network
 - keep using port `8000` unless you also update the URL teammates open
+
+## Recommended Sharing Workflow
+
+If you are setting this up for another PC plus mobile devices:
+
+1. Run the project on the main PC with `python app.py --host 0.0.0.0 --port 8000`.
+2. Find the PC's local IP address with `ipconfig`.
+3. Open `http://<that-ip>:8000` on the other PC or phone.
+4. Use the `User` button for the phone-style interface and `Admin` for the desktop web interface.
+5. If the page does not load from another device, check the Windows firewall and confirm both devices are on the same Wi-Fi network.
 
 ## Static-Only Mode
 
@@ -106,6 +138,7 @@ When running `app.py`, these routes are available:
 - `GET /api/weather`
 - `POST /api/nearest-road-point`
 - `POST /api/route`
+- `POST /api/intelligent-match`
 - `POST /api/best-driver`
 
 ## External Services The App Depends On
@@ -144,7 +177,7 @@ With no key, the rest of the app still works. Only live traffic summaries are di
 4. It loads landmark-style hotspots and uses them as anchors for simulated drivers.
 5. It lets the user choose pickup and drop-off points on the map.
 6. It snaps those points to the nearest routable road segment.
-7. It finds the best available driver using A* path distance.
+7. In Python-backed mode, it ranks drivers through `passenger-driver.py` using the intelligent matching formula and returns the ranked suggestions to the frontend.
 
 ## Troubleshooting
 
