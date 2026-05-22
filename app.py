@@ -18,6 +18,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
+from pricing import FUEL_PRICE_PROVIDER, calculate_fare
+
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
@@ -1089,6 +1091,10 @@ class AppHandler(BaseHTTPRequestHandler):
             self.handle_weather()
             return
 
+        if parsed.path == "/api/pricing/fuel":
+            self.handle_fuel_price()
+            return
+
         if parsed.path == "/api/heatmap-data":
             self.handle_heatmap_data(parsed.query)
             return
@@ -1115,6 +1121,10 @@ class AppHandler(BaseHTTPRequestHandler):
             self.handle_traffic_samples(body)
             return
 
+        if parsed.path == "/api/pricing/estimate":
+            self.handle_pricing_estimate(body)
+            return
+
         if parsed.path == "/api/best-driver":
             self.handle_best_driver(body)
             return
@@ -1130,6 +1140,29 @@ class AppHandler(BaseHTTPRequestHandler):
     def handle_weather(self) -> None:
         try:
             self.respond_json(SERVICE.load_weather())
+        except Exception as error:  # noqa: BLE001
+            self.respond_error_payload(error)
+
+    def handle_fuel_price(self) -> None:
+        try:
+            self.respond_json(FUEL_PRICE_PROVIDER.get_current_price())
+        except Exception as error:  # noqa: BLE001
+            self.respond_error_payload(error)
+
+    def handle_pricing_estimate(self, body: dict[str, Any]) -> None:
+        try:
+            fuel = FUEL_PRICE_PROVIDER.get_current_price()
+            estimate = calculate_fare(
+                vehicle_type=str(body.get("vehicleType", "motorcycle")),
+                pickup_distance_meters=float(body.get("pickupDistanceMeters", 0) or 0),
+                trip_distance_meters=float(body.get("tripDistanceMeters", 0) or 0),
+                fuel_price_per_liter=float(fuel["pricePerLiter"]),
+            )
+            estimate["fuelPrice"] = fuel
+            estimate["sourceNote"] = (
+                "Uses SAKTOGO_FUEL_PRICE_API_URL when configured; otherwise uses the local fallback price."
+            )
+            self.respond_json(estimate)
         except Exception as error:  # noqa: BLE001
             self.respond_error_payload(error)
 

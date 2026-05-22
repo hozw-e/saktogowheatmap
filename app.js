@@ -22,6 +22,19 @@ const MOCK_DRIVER_RANDOM_SEED = 20260522;
 const MATCH_DEFAULT_RADIUS_METERS = 3000;
 const MATCH_EXPANDED_RADIUS_METERS = 5000;
 const MATCH_TRAFFIC_FALLBACK_RATIO = 0.72;
+const DEFAULT_FUEL_PRICE_PER_LITER = 86.8;
+const PRICING_FALLBACK_CONFIG = {
+  motorcycleKmPerLiter: 40,
+  carKmPerLiter: 11,
+  motorcycleBaseFare: 40,
+  carBaseFare: 70,
+  motorcycleRatePerKm: 10,
+  carRatePerKm: 18,
+  serviceFee: 10,
+  fuelMarkupMultiplier: 1.15,
+  minimumMotorcycleFare: 55,
+  minimumCarFare: 85
+};
 const LOCATION_NEAR_OLONGAPO_RADIUS_METERS = 8000;
 const DRIVER_ACTIVITY_SCHEDULE = [
   { hour: 0, active: 25, assignedMin: 0.10, assignedMax: 0.20 },
@@ -75,6 +88,8 @@ const offerDetailText = document.getElementById("offer-detail-text");
 const matcherSourceRow = document.getElementById("matcher-source-row");
 const offerScoreText = document.getElementById("offer-score-text");
 const offerEtaText = document.getElementById("offer-eta-text");
+const offerFareText = document.getElementById("offer-fare-text");
+const offerFuelText = document.getElementById("offer-fuel-text");
 const offerBaselineText = document.getElementById("offer-baseline-text");
 const offerBaselineDistanceText = document.getElementById("offer-baseline-distance-text");
 const offerReasonList = document.getElementById("offer-reason-list");
@@ -103,6 +118,10 @@ const loadingOverlay = document.getElementById("loading-overlay");
 const loadingStatusText = document.getElementById("loading-status-text");
 const desktopShellHost = document.getElementById("desktop-shell-host");
 const heatmapNavBtn = document.getElementById("heatmap-nav-btn");
+const adminPricingDetailsBtn = document.getElementById("admin-pricing-details-btn");
+const pricingDetailsPanel = document.getElementById("pricing-details-panel");
+const pricingDetailsTitle = document.getElementById("pricing-details-title");
+const pricingDetailsText = document.getElementById("pricing-details-text");
 const phoneFrame = document.querySelector(".phone-frame");
 const phoneShell = document.querySelector(".phone-shell");
 const phoneScreen = document.querySelector(".phone-screen");
@@ -186,7 +205,8 @@ const state = {
   heatmapHour: getCurrentManilaHour(),
   heatmapCache: {},
   heatmapSliderControl: null,
-  heatmapLegendControl: null
+  heatmapLegendControl: null,
+  lastPricingEstimate: null
 };
 
 if (pickMeBtn) pickMeBtn.addEventListener("click", () => setSelectionMode("pickup"));
@@ -204,6 +224,7 @@ tabDriverBtn.addEventListener("click", () => setUserPanelTab("driver"));
 tabTripBtn.addEventListener("click", () => setUserPanelTab("trip"));
 tabMoreBtn.addEventListener("click", () => setUserPanelTab("more"));
 if (heatmapNavBtn) heatmapNavBtn.addEventListener("click", () => toggleHeatmapView());
+if (adminPricingDetailsBtn) adminPricingDetailsBtn.addEventListener("click", () => togglePricingDetailsPanel());
 
 map.on("click", (event) => {
   if (!state.graph.size) {
@@ -266,6 +287,10 @@ function setEntryMode(mode) {
   document.body.classList.add(mode === "user" ? "view-mode-user" : "view-mode-admin");
   document.body.dataset.userPanel = state.userPanelTab;
   syncShellPlacement(mode);
+  if (mode !== "admin" && pricingDetailsPanel) {
+    pricingDetailsPanel.hidden = true;
+    adminPricingDetailsBtn?.classList.remove("is-active");
+  }
 
   if (entryOverlay) {
     if (entryOverlay.contains(document.activeElement)) {
@@ -547,7 +572,7 @@ function updateRequestUILegacy() {
   findDriverBtn.disabled = activeRide || (!hasPickup && state.selectionMode !== "dropoff");
   chooseCarBtn.disabled = activeRide;
   chooseMotorcycleBtn.disabled = activeRide;
-  acceptDriverBtn.disabled = !hasOffer || activeRide;
+  acceptDriverBtn.disabled = !hasOffer || activeRide || Boolean(state.pendingDriverOffer?.pricingLoading);
   otherDriverBtn.disabled = !hasOffer || activeRide;
   cancelRequestBtn.disabled = !hasPickup && !hasDropoff && !hasOffer && !activeRide;
   rideTypeText.textContent = state.selectedVehicleType
@@ -608,6 +633,8 @@ function updateOfferCard(title, detail) {
 function clearOfferMatchSummary() {
   if (offerScoreText) offerScoreText.textContent = "--";
   if (offerEtaText) offerEtaText.textContent = "--";
+  if (offerFareText) offerFareText.textContent = "--";
+  if (offerFuelText) offerFuelText.textContent = "--";
   if (offerBaselineText) offerBaselineText.textContent = "--";
   if (offerBaselineDistanceText) offerBaselineDistanceText.textContent = "--";
   if (matcherSourceRow) {
@@ -632,8 +659,23 @@ function renderOfferMatchSummary(offer) {
     ? `${(baseline.directDistanceMeters / 1000).toFixed(2)} km straight-line`
     : `${(state.suggestionSearchRadiusMeters / 1000).toFixed(1)} km service range`;
 
+  const pricing = offer.pricingEstimate || null;
+  const pricingLoading = Boolean(offer.pricingLoading);
+  const fareText = pricingLoading
+    ? "Calculating..."
+    : pricing
+      ? formatPeso(pricing.totalFare)
+      : "--";
+  const fuelText = pricingLoading
+    ? "Calculating..."
+    : pricing
+      ? `${formatDecimal(pricing.litersUsed, 3)} L`
+      : "--";
+
   if (offerScoreText) offerScoreText.textContent = scoreText;
   if (offerEtaText) offerEtaText.textContent = etaText;
+  if (offerFareText) offerFareText.textContent = fareText;
+  if (offerFuelText) offerFuelText.textContent = fuelText;
   if (offerBaselineText) offerBaselineText.textContent = baselineDriverText;
   if (offerBaselineDistanceText) offerBaselineDistanceText.textContent = baselineDistanceText;
   renderMatcherSourceBadges(offer);
@@ -714,6 +756,13 @@ function buildOfferReasonItems(offer) {
     items.push(`Pickup route: ${(offer.pickupDistanceMeters / 1000).toFixed(2)} km.`);
   }
 
+  if (offer.pricingEstimate) {
+    items.push(`Estimated fare: ${formatPeso(offer.pricingEstimate.totalFare)}.`);
+    items.push(`Fuel basis: ${formatDecimal(offer.pricingEstimate.litersUsed, 3)} L at ${formatPeso(offer.pricingEstimate.fuelPricePerLiter)}/L using ${formatDecimal(offer.pricingEstimate.kmPerLiter, 1)} km/L.`);
+  } else if (offer.pricingLoading) {
+    items.push("Fare estimate: calculating fuel-based price.");
+  }
+
   if (typeof offer.routeEfficiencyScore === "number") {
     items.push(`Route efficiency: ${Math.round(offer.routeEfficiencyScore * 100)}%.`);
   }
@@ -745,6 +794,219 @@ function buildOfferReasonItems(offer) {
   return items;
 }
 
+function formatPeso(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? `PHP ${number.toFixed(2)}` : "--";
+}
+
+function formatDecimal(value, digits = 2) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(digits) : "--";
+}
+
+function roundTo(value, digits = 2) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return 0;
+  }
+
+  const factor = 10 ** digits;
+  return Math.round(number * factor) / factor;
+}
+
+function buildPricingRequest(offer) {
+  return {
+    vehicleType: offer?.driver?.type || state.selectedVehicleType || "motorcycle",
+    pickupDistanceMeters: Number(offer?.pickupDistanceMeters || 0),
+    tripDistanceMeters: Number(offer?.tripPath?.distance || 0)
+  };
+}
+
+async function fetchPricingEstimate(offer) {
+  const request = buildPricingRequest(offer);
+
+  if (state.usingPythonBackend) {
+    try {
+      const response = await fetch("/api/pricing/estimate", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json"
+        },
+        body: JSON.stringify(request)
+      });
+
+      if (response.ok) {
+        const estimate = await response.json();
+        if (estimate && typeof estimate.totalFare === "number") {
+          return { ...estimate, request };
+        }
+      } else {
+        console.warn("Pricing API returned an error, using browser fallback.", response.status);
+      }
+    } catch (error) {
+      console.warn("Pricing API unavailable, using browser fallback.", error);
+    }
+  }
+
+  return buildFallbackPricingEstimate(offer, request);
+}
+
+function buildFallbackPricingEstimate(offer, request = buildPricingRequest(offer)) {
+  const vehicleType = request.vehicleType === "car" ? "car" : "motorcycle";
+  const config = PRICING_FALLBACK_CONFIG;
+  const pickupKm = Math.max(0, request.pickupDistanceMeters / 1000);
+  const tripKm = Math.max(0, request.tripDistanceMeters / 1000);
+  const routeKm = pickupKm + tripKm;
+  const isCar = vehicleType === "car";
+  const kmPerLiter = isCar ? config.carKmPerLiter : config.motorcycleKmPerLiter;
+  const baseFare = isCar ? config.carBaseFare : config.motorcycleBaseFare;
+  const ratePerKm = isCar ? config.carRatePerKm : config.motorcycleRatePerKm;
+  const minimumFare = isCar ? config.minimumCarFare : config.minimumMotorcycleFare;
+  const litersUsed = routeKm / Math.max(kmPerLiter, 1);
+  const fuelCost = litersUsed * DEFAULT_FUEL_PRICE_PER_LITER;
+  const fuelComponent = fuelCost * config.fuelMarkupMultiplier;
+  const distanceFee = routeKm * ratePerKm;
+  const totalFare = Math.max(minimumFare, baseFare + distanceFee + fuelComponent + config.serviceFee);
+
+  return {
+    vehicleType,
+    routeKm: roundTo(routeKm, 2),
+    pickupKm: roundTo(pickupKm, 2),
+    tripKm: roundTo(tripKm, 2),
+    kmPerLiter,
+    fuelPricePerLiter: roundTo(DEFAULT_FUEL_PRICE_PER_LITER, 2),
+    litersUsed: roundTo(litersUsed, 3),
+    fuelCost: roundTo(fuelCost, 2),
+    fuelComponent: roundTo(fuelComponent, 2),
+    baseFare: roundTo(baseFare, 2),
+    distanceFee: roundTo(distanceFee, 2),
+    serviceFee: roundTo(config.serviceFee, 2),
+    minimumFare: roundTo(minimumFare, 2),
+    totalFare: roundTo(totalFare, 2),
+    config,
+    request,
+    fuelPrice: {
+      pricePerLiter: DEFAULT_FUEL_PRICE_PER_LITER,
+      source: "browser_fallback",
+      location: "Olongapo",
+      updatedAt: null,
+      note: "Python pricing API unavailable; using browser fallback fuel price."
+    },
+    sourceNote: "Browser fallback pricing is active because the Python pricing endpoint was unavailable."
+  };
+}
+
+async function refreshOfferPricing(offer) {
+  if (!offer) {
+    return null;
+  }
+
+  offer.pricingLoading = true;
+  offer.pricingError = null;
+  renderOfferMatchSummary(offer);
+  updateRequestUI();
+
+  try {
+    const estimate = await fetchPricingEstimate(offer);
+    offer.pricingLoading = false;
+    offer.pricingEstimate = estimate;
+
+    if (state.pendingDriverOffer === offer) {
+      state.lastPricingEstimate = estimate;
+      renderOfferMatchSummary(offer);
+      updatePricingDetailsPanel(estimate, { onlyIfOpen: true });
+      updateRequestUI();
+    }
+
+    return estimate;
+  } catch (error) {
+    offer.pricingLoading = false;
+    offer.pricingError = error;
+    if (state.pendingDriverOffer === offer) {
+      renderOfferMatchSummary(offer);
+      updateRequestUI();
+      setStatus("Fare estimate is unavailable right now. Please try another suggestion or refresh pricing.");
+    }
+    return null;
+  }
+}
+
+async function ensureOfferPricing(offer) {
+  if (offer?.pricingEstimate) {
+    return offer.pricingEstimate;
+  }
+
+  const estimate = await refreshOfferPricing(offer);
+  if (estimate || !offer) {
+    return estimate;
+  }
+
+  const fallbackEstimate = buildFallbackPricingEstimate(offer);
+  offer.pricingLoading = false;
+  offer.pricingEstimate = fallbackEstimate;
+  state.lastPricingEstimate = fallbackEstimate;
+  renderOfferMatchSummary(offer);
+  updatePricingDetailsPanel(fallbackEstimate, { onlyIfOpen: true });
+  return fallbackEstimate;
+}
+
+function togglePricingDetailsPanel() {
+  if (!pricingDetailsPanel || state.viewMode !== "admin") {
+    return;
+  }
+
+  const shouldOpen = pricingDetailsPanel.hidden;
+  pricingDetailsPanel.hidden = !shouldOpen;
+  if (adminPricingDetailsBtn) {
+    adminPricingDetailsBtn.classList.toggle("is-active", shouldOpen);
+  }
+
+  if (!shouldOpen) {
+    return;
+  }
+
+  const activeEstimate = state.pendingDriverOffer?.pricingEstimate || state.lastPricingEstimate;
+  updatePricingDetailsPanel(activeEstimate);
+
+  if (state.pendingDriverOffer && !state.pendingDriverOffer.pricingEstimate && !state.pendingDriverOffer.pricingLoading) {
+    void refreshOfferPricing(state.pendingDriverOffer);
+  }
+}
+
+function updatePricingDetailsPanel(estimate, options = {}) {
+  if (!pricingDetailsPanel || !pricingDetailsTitle || !pricingDetailsText) {
+    return;
+  }
+
+  if (options.onlyIfOpen && pricingDetailsPanel.hidden) {
+    return;
+  }
+
+  if (!estimate) {
+    pricingDetailsTitle.textContent = "Fare calculation";
+    pricingDetailsText.textContent = "No fare has been calculated yet. Generate a driver suggestion to see route distance, fuel use, and fare components.";
+    return;
+  }
+
+  const vehicleLabel = estimate.vehicleType === "car" ? "Car" : "Motorcycle";
+  const fuelSource = getPricingSourceLabel(estimate);
+  const sourceNote = estimate.sourceNote || estimate.fuelPrice?.note || "";
+  pricingDetailsTitle.textContent = `${vehicleLabel} fare: ${formatPeso(estimate.totalFare)}`;
+  pricingDetailsText.textContent = `Route ${formatDecimal(estimate.routeKm, 2)} km: pickup ${formatDecimal(estimate.pickupKm, 2)} km plus trip ${formatDecimal(estimate.tripKm, 2)} km. Fuel ${formatDecimal(estimate.litersUsed, 3)} L at ${formatPeso(estimate.fuelPricePerLiter)}/L using ${formatDecimal(estimate.kmPerLiter, 1)} km/L. Fare parts: base ${formatPeso(estimate.baseFare)}, distance ${formatPeso(estimate.distanceFee)}, fuel ${formatPeso(estimate.fuelComponent)}, service ${formatPeso(estimate.serviceFee)}, minimum ${formatPeso(estimate.minimumFare)}. Source: ${fuelSource}${sourceNote ? `. ${sourceNote}` : ""}`;
+}
+
+function getPricingSourceLabel(estimate) {
+  const source = estimate?.fuelPrice?.source || "fallback_config";
+  if (source === "configured_api") {
+    return "configured Olongapo fuel API";
+  }
+  if (source === "browser_fallback") {
+    return "browser fallback";
+  }
+  return "local fallback fuel price";
+}
+
 function updateRequestUI() {
   queueMicrotask(normalizeUiCopy);
   pickMeBtn.classList.toggle("is-active", state.selectionMode === "pickup");
@@ -761,12 +1023,13 @@ function updateRequestUI() {
   findDriverBtn.disabled = activeRide || (!hasPickup && state.selectionMode !== "dropoff");
   chooseCarBtn.disabled = activeRide;
   chooseMotorcycleBtn.disabled = activeRide;
-  acceptDriverBtn.disabled = !hasOffer || activeRide;
+  acceptDriverBtn.disabled = !hasOffer || activeRide || Boolean(state.pendingDriverOffer?.pricingLoading);
   otherDriverBtn.disabled = !hasOffer || activeRide;
   cancelRequestBtn.disabled = !hasPickup && !hasDropoff && !hasOffer && !activeRide;
   pickMeBtn.textContent = hasPickup ? "Change Pickup" : "Set Pickup";
   findDriverBtn.textContent = hasDropoff ? "Change Drop-off" : "Set Drop-off";
   resetBtn.textContent = hasPickup || hasDropoff || hasOffer || activeRide ? "Clear Request" : "Reset";
+  acceptDriverBtn.textContent = state.pendingDriverOffer?.pricingLoading ? "Calculating Fare" : "Accept Driver";
   otherDriverBtn.textContent = hasOffer ? "See Next Driver" : "Suggest Other Driver";
   cancelRequestBtn.textContent = activeRide ? "Ride Active" : "Cancel Request";
   if (state.viewMode === "user") {
@@ -1980,6 +2243,7 @@ function clearPendingDriverOffer(clearSelection = true) {
 
   state.offeredDriverId = null;
   state.pendingDriverOffer = null;
+  state.lastPricingEstimate = null;
 
   if (clearSelection && state.selectedDriverId && !state.drivers.find((driver) => driver.id === state.selectedDriverId)?.lockedToUser) {
     state.selectedDriverId = null;
@@ -2346,6 +2610,7 @@ function presentRankedDriverSuggestion() {
     syncPendingDriverOfferToHeldDriver(rankedCandidate);
     drawSuggestedDriverPreview(liveDriver, rankedCandidate.startNode, rankedCandidate.pickupPath, rankedCandidate.tripPath);
     updateSuggestedDriverInfo(rankedCandidate);
+    void refreshOfferPricing(rankedCandidate);
     return true;
   }
 
@@ -2572,9 +2837,14 @@ function assignMatchedDriverToUser(driver, startNode, path, offer) {
   driver.movementWeatherSource = offer?.weatherSource || state.weatherContext?.source || "weather_fallback";
 }
 
-function acceptPendingDriverOffer() {
+async function acceptPendingDriverOffer() {
   const offer = state.pendingDriverOffer;
   if (!offer) {
+    return;
+  }
+
+  const pricingEstimate = await ensureOfferPricing(offer);
+  if (state.pendingDriverOffer !== offer) {
     return;
   }
 
@@ -2598,7 +2868,12 @@ function acceptPendingDriverOffer() {
   driverTrafficText.textContent = "Driver accepted and now heading to your pickup point";
   routeText.textContent = `Driver to pickup: ${(offer.pickupPath.distance / 1000).toFixed(2)} km`;
   routeTrafficText.textContent = "Route traffic: pickup leg is now active";
-  updateOfferCard("Driver accepted", "Your driver is now heading to the pickup point. You will switch to the drop-off trip after pickup.");
+  const acceptedDetail = pricingEstimate
+    ? `Your driver is now heading to the pickup point. Estimated fare ${formatPeso(pricingEstimate.totalFare)}. You will switch to the drop-off trip after pickup.`
+    : "Your driver is now heading to the pickup point. You will switch to the drop-off trip after pickup.";
+  updateOfferCard("Driver accepted", acceptedDetail);
+  renderOfferMatchSummary(offer);
+  updatePricingDetailsPanel(pricingEstimate, { onlyIfOpen: true });
   loadTrafficForPoint("driver", getDriverRouteStartNode(offer.driver));
   loadRouteTrafficSummary(offer.pickupPath.nodeIds, offer.driver, offer.pickupPath.distance);
 

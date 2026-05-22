@@ -370,7 +370,10 @@ button {
   border: 0;
   border-radius: 999px;
   padding: 12px 16px;
+  max-width: 100%;
+  min-width: 0;
   cursor: pointer;
+  text-align: center;
   transition: transform 160ms ease, background 160ms ease, color 160ms ease, opacity 160ms ease;
 }
 
@@ -439,6 +442,16 @@ button {
   display: none;
 }
 
+body.view-mode-user [data-admin-only],
+.pricing-details-panel[hidden] {
+  display: none !important;
+}
+
+.pricing-details-panel strong {
+  display: block;
+  line-height: 1.35;
+}
+
 .offer-card .button-row {
   margin-top: 14px;
 }
@@ -487,6 +500,11 @@ button {
 .offer-card .action-btn,
 .offer-card .ghost-btn {
   flex: 1 1 140px;
+}
+
+.button-row--offer .action-btn,
+.button-row--offer .ghost-btn {
+  white-space: normal;
 }
 
 .offer-summary {
@@ -979,7 +997,7 @@ body.view-mode-admin .panel {
   pointer-events: none;
 }
 
-body.view-mode-admin .panel > *:not(.admin-nav) {
+body.view-mode-admin .panel > *:not(.admin-nav):not(.pricing-details-panel) {
   display: none !important;
 }
 
@@ -991,6 +1009,22 @@ body.view-mode-admin .admin-nav {
   background: rgba(248, 250, 245, 0.94);
   border: 1px solid rgba(84, 104, 90, 0.16);
   box-shadow: 0 8px 24px rgba(29, 53, 39, 0.14);
+}
+
+body.view-mode-admin .pricing-details-panel {
+  position: absolute;
+  top: 58px;
+  left: 0;
+  width: min(380px, calc(100vw - 56px));
+  pointer-events: auto;
+  border-radius: 18px;
+  background: rgba(248, 250, 245, 0.96);
+  border: 1px solid rgba(84, 104, 90, 0.16);
+  box-shadow: 0 12px 30px rgba(29, 53, 39, 0.16);
+}
+
+body.view-mode-admin .pricing-details-panel .detail-text {
+  font-size: 0.9rem;
 }
 
 body.view-mode-admin .stats {

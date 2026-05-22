@@ -55,6 +55,7 @@
 
       <div class="admin-nav" aria-label="Admin view controls">
         <button id="heatmap-nav-btn" class="ghost-btn" type="button">Booking Heatmap</button>
+        <button id="admin-pricing-details-btn" class="ghost-btn" type="button">Pricing Details</button>
       </div>
 
       <div class="control-group" data-mobile-section="request">
@@ -132,6 +133,14 @@
             <strong id="offer-eta-text">--</strong>
           </div>
           <div class="offer-summary__item">
+            <span class="offer-summary__label">Estimated fare</span>
+            <strong id="offer-fare-text">--</strong>
+          </div>
+          <div class="offer-summary__item">
+            <span class="offer-summary__label">Fuel used</span>
+            <strong id="offer-fuel-text">--</strong>
+          </div>
+          <div class="offer-summary__item">
             <span class="offer-summary__label">Baseline driver</span>
             <strong id="offer-baseline-text">--</strong>
           </div>
@@ -149,6 +158,12 @@
           <button id="other-driver-btn" class="ghost-btn" type="button">Suggest Other Driver</button>
           <button id="cancel-request-btn" class="ghost-btn" type="button">Cancel Request</button>
         </div>
+      </div>
+
+      <div id="pricing-details-panel" class="control-group pricing-details-panel" data-admin-only hidden>
+        <p class="control-group__label">Pricing Details</p>
+        <strong id="pricing-details-title">Fare calculation</strong>
+        <small id="pricing-details-text" class="detail-text">No fare has been calculated yet.</small>
       </div>
 
       <div class="stats">
