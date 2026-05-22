@@ -53,6 +53,10 @@
 
       <!-- Intro copy removed per request; UI will present strict step flow -->
 
+      <div class="admin-nav" aria-label="Admin view controls">
+        <button id="heatmap-nav-btn" class="ghost-btn" type="button">Booking Heatmap</button>
+      </div>
+
       <div class="control-group" data-mobile-section="request">
         <div class="flow-steps" aria-label="Ride request steps">
           <div id="step-vehicle" class="flow-step">
@@ -204,6 +208,7 @@
     integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
     crossorigin=""
   ></script>
+  <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
   <script src="./app.js"></script>
 </body>
 </html>

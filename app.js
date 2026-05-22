@@ -40,6 +40,18 @@ const LANDMARK_TOURISM_REGEX = "attraction|museum|hotel";
 const LANDMARK_SEARCH_RADIUS_METERS = 900;
 const USER_POINT_NODE_ID = "__user_point__";
 const DROPOFF_POINT_NODE_ID = "__dropoff_point__";
+const HEATMAP_GRADIENT = {
+  0.0: '#0000ff',   // Blue (low)
+  0.33: '#00ff00',  // Green
+  0.66: '#ffff00',  // Yellow
+  1.0: '#ff0000'    // Red (high)
+};
+
+function getCurrentManilaHour() {
+  const hourStr = new Date().toLocaleString('en-US', { timeZone: 'Asia/Manila', hour: 'numeric', hour12: false });
+  return parseInt(hourStr, 10);
+}
+
 let mockDriverRandomState = MOCK_DRIVER_RANDOM_SEED;
 
 const statusText = document.getElementById("status-text");
@@ -90,6 +102,7 @@ const enterAdminBtn = document.getElementById("enter-admin-btn");
 const loadingOverlay = document.getElementById("loading-overlay");
 const loadingStatusText = document.getElementById("loading-status-text");
 const desktopShellHost = document.getElementById("desktop-shell-host");
+const heatmapNavBtn = document.getElementById("heatmap-nav-btn");
 const phoneFrame = document.querySelector(".phone-frame");
 const phoneShell = document.querySelector(".phone-shell");
 const phoneScreen = document.querySelector(".phone-screen");
@@ -167,7 +180,13 @@ const state = {
   centerPoint: {
     lat: INITIAL_CENTER[0],
     lng: INITIAL_CENTER[1]
-  }
+  },
+  heatmapView: false,
+  heatmapLayer: null,
+  heatmapHour: getCurrentManilaHour(),
+  heatmapCache: {},
+  heatmapSliderControl: null,
+  heatmapLegendControl: null
 };
 
 if (pickMeBtn) pickMeBtn.addEventListener("click", () => setSelectionMode("pickup"));
@@ -184,6 +203,7 @@ tabRequestBtn.addEventListener("click", () => setUserPanelTab("request"));
 tabDriverBtn.addEventListener("click", () => setUserPanelTab("driver"));
 tabTripBtn.addEventListener("click", () => setUserPanelTab("trip"));
 tabMoreBtn.addEventListener("click", () => setUserPanelTab("more"));
+if (heatmapNavBtn) heatmapNavBtn.addEventListener("click", () => toggleHeatmapView());
 
 map.on("click", (event) => {
   if (!state.graph.size) {
@@ -903,6 +923,8 @@ async function initialize() {
     startDriverSimulation();
     window.setInterval(() => loadWeather(), 600000);
     state.appReady = true;
+    state.heatmapSliderControl = createHeatmapSliderControl();
+    state.heatmapLegendControl = createHeatmapLegendControl();
     setStatus(`Ready. Loaded ${state.graph.size.toLocaleString()} routable road nodes and ${state.landmarks.length.toLocaleString()} driver hotspots.`);
     hideLoadingOverlay();
     return;
@@ -931,6 +953,8 @@ async function initialize() {
   startDriverSimulation();
 
   state.appReady = true;
+  state.heatmapSliderControl = createHeatmapSliderControl();
+  state.heatmapLegendControl = createHeatmapLegendControl();
   setStatus(`Ready. Loaded ${state.graph.size.toLocaleString()} routable road nodes and ${state.landmarks.length.toLocaleString()} driver hotspots.`);
   hideLoadingOverlay();
 }
@@ -4369,4 +4393,339 @@ function describeWeatherCode(code, isDay = 1) {
   };
 
   return weatherCodes[code] || "Unknown weather";
+}
+
+// ─── Heatmap Time Slider and Peak Hour Indicators ───────────────────────────
+
+/**
+ * Format an hour (0-23) into 12-hour format with AM/PM.
+ * e.g., 0 → "12:00 AM", 6 → "6:00 AM", 12 → "12:00 PM", 17 → "5:00 PM"
+ */
+function formatHour(hour) {
+  if (hour === 0) return "12:00 AM";
+  if (hour < 12) return `${hour}:00 AM`;
+  if (hour === 12) return "12:00 PM";
+  return `${hour - 12}:00 PM`;
+}
+
+/**
+ * Return a peak label for the given hour.
+ * Hours 6, 7, 8 → "Morning Peak"
+ * Hours 17, 18, 19 → "Evening Peak"
+ * All other hours → "" (empty string)
+ */
+function getPeakLabel(hour) {
+  if (hour >= 6 && hour <= 8) return "Morning Peak";
+  if (hour >= 17 && hour <= 19) return "Evening Peak";
+  return "";
+}
+
+/**
+ * Create the heatmap time slider Leaflet control.
+ * Includes range input, time label, peak label, and peak track overlay.
+ */
+function createHeatmapSliderControl() {
+  const control = L.control({ position: "topright" });
+
+  control.onAdd = function () {
+    const container = L.DomUtil.create("div", "heatmap-slider-control");
+    L.DomEvent.disableClickPropagation(container);
+
+    // Time display row (time label + peak label)
+    const timeRow = L.DomUtil.create("div", "heatmap-slider-time-row", container);
+    const timeLabel = L.DomUtil.create("span", "heatmap-slider-time-label", timeRow);
+    timeLabel.textContent = formatHour(state.heatmapHour);
+
+    const peakLabelEl = L.DomUtil.create("span", "peak-label", timeRow);
+    const initialPeak = getPeakLabel(state.heatmapHour);
+    peakLabelEl.textContent = initialPeak;
+    peakLabelEl.style.display = initialPeak ? "inline" : "none";
+
+    // Slider wrapper (contains peak track + range input)
+    const sliderWrapper = L.DomUtil.create("div", "heatmap-slider-wrapper", container);
+
+    // Peak track overlay (colored segments behind the range input)
+    const peakTrack = L.DomUtil.create("div", "peak-track", sliderWrapper);
+
+    // Morning peak segment: hours 6-8 → positions 6/24 to 9/24 (25% to 37.5%)
+    const morningSegment = L.DomUtil.create("div", "peak-track__segment peak-track__segment--morning", peakTrack);
+    morningSegment.style.left = ((6 / 24) * 100).toFixed(2) + "%";
+    morningSegment.style.width = ((3 / 24) * 100).toFixed(2) + "%";
+
+    // Evening peak segment: hours 17-19 → positions 17/24 to 20/24 (70.83% to 83.33%)
+    const eveningSegment = L.DomUtil.create("div", "peak-track__segment peak-track__segment--evening", peakTrack);
+    eveningSegment.style.left = ((17 / 24) * 100).toFixed(2) + "%";
+    eveningSegment.style.width = ((3 / 24) * 100).toFixed(2) + "%";
+
+    // Range input
+    const slider = L.DomUtil.create("input", "heatmap-slider-input", sliderWrapper);
+    slider.type = "range";
+    slider.min = "0";
+    slider.max = "23";
+    slider.step = "1";
+    slider.value = String(state.heatmapHour);
+    slider.setAttribute("aria-label", "Select hour of day for heatmap");
+
+    // Event handler for slider input - update label immediately while dragging
+    slider.addEventListener("input", function () {
+      const hour = parseInt(this.value, 10);
+
+      // Update time label
+      timeLabel.textContent = formatHour(hour);
+
+      // Update peak label
+      const peakLabel = getPeakLabel(hour);
+      peakLabelEl.textContent = peakLabel;
+      peakLabelEl.style.display = peakLabel ? "inline" : "none";
+    });
+
+    // Event handler for slider change - fetch and render data when released
+    slider.addEventListener("change", async function () {
+      const hour = parseInt(this.value, 10);
+      state.heatmapHour = hour;
+      const points = await fetchHeatmapData(hour);
+      if (points) renderHeatmapLayer(points);
+    });
+
+    return container;
+  };
+
+  return control;
+}
+
+// ─── Heatmap Data Fetching and Rendering ────────────────────────────────────
+
+/**
+ * Display a temporary notice overlay on the map area.
+ * Auto-dismisses after 5 seconds.
+ */
+function showMapNotice(message) {
+  const existing = document.querySelector(".map-notice-overlay");
+  if (existing) {
+    existing.remove();
+  }
+
+  const notice = document.createElement("div");
+  notice.className = "map-notice-overlay";
+  notice.textContent = message;
+  notice.setAttribute("role", "alert");
+
+  const mapContainer = document.getElementById("map");
+  if (mapContainer) {
+    mapContainer.appendChild(notice);
+  } else {
+    document.body.appendChild(notice);
+  }
+
+  setTimeout(() => {
+    if (notice.parentElement) {
+      notice.remove();
+    }
+  }, 5000);
+}
+
+/**
+ * Fetch heatmap data for a given hour from the backend API.
+ * Caches responses in state.heatmapCache to avoid re-fetching.
+ * Returns the points array on success, or null on failure.
+ */
+async function fetchHeatmapData(hour) {
+  if (state.heatmapCache[hour]) {
+    return state.heatmapCache[hour];
+  }
+
+  try {
+    const response = await fetch(`/api/heatmap-data?hour=${hour}`);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+    const points = data.points || [];
+    state.heatmapCache[hour] = points;
+    return points;
+  } catch (error) {
+    console.error("Failed to fetch heatmap data:", error);
+    showMapNotice("Data update failed");
+    return null;
+  }
+}
+
+/**
+ * Render a heatmap layer on the map using the given points.
+ * Points are expected as [{lat, lng, count}, ...] from the API.
+ * Removes any existing heatmap layer first, then creates a new one.
+ */
+function renderHeatmapLayer(points) {
+  removeHeatmapLayer();
+
+  if (!points || points.length === 0) {
+    showMapNotice("No bookings for this hour");
+    return;
+  }
+
+  const heatPoints = points.map(p => [p.lat, p.lng, p.count]);
+
+  state.heatmapLayer = L.heatLayer(heatPoints, {
+    radius: 25,
+    blur: 15,
+    maxZoom: 17,
+    gradient: HEATMAP_GRADIENT
+  }).addTo(map);
+}
+
+/**
+ * Remove the heatmap layer from the map and clear the reference.
+ */
+function removeHeatmapLayer() {
+  if (state.heatmapLayer) {
+    map.removeLayer(state.heatmapLayer);
+    state.heatmapLayer = null;
+  }
+}
+
+// ─── Heatmap Legend Control ──────────────────────────────────────────────────
+
+/**
+ * Create the intensity scale legend control for the heatmap.
+ * Renders a gradient bar matching HEATMAP_GRADIENT with "Low" and "High" labels.
+ * The control is created once and reused — it is NOT recreated on data updates,
+ * which prevents flickering.
+ */
+function createHeatmapLegendControl() {
+  const control = L.control({ position: "bottomright" });
+
+  control.onAdd = function () {
+    const container = L.DomUtil.create("div", "heatmap-legend-control");
+    L.DomEvent.disableClickPropagation(container);
+
+    const labels = L.DomUtil.create("div", "legend-labels", container);
+    const lowLabel = L.DomUtil.create("span", "", labels);
+    lowLabel.textContent = "Low";
+    const highLabel = L.DomUtil.create("span", "", labels);
+    highLabel.textContent = "High";
+
+    const gradientBar = L.DomUtil.create("div", "legend-gradient-bar", container);
+    gradientBar.style.background = "linear-gradient(to right, #0000ff 0%, #00ff00 33%, #ffff00 66%, #ff0000 100%)";
+    gradientBar.style.minWidth = "200px";
+    gradientBar.style.height = "16px";
+    gradientBar.style.borderRadius = "4px";
+
+    return container;
+  };
+
+  return control;
+}
+
+// ─── Heatmap View Toggle (Admin Navigation) ─────────────────────────────────
+
+/**
+ * Toggle between the default admin view and the heatmap view.
+ */
+function toggleHeatmapView() {
+  if (state.heatmapView) {
+    deactivateHeatmapView();
+  } else {
+    activateHeatmapView();
+  }
+}
+
+/**
+ * Activate the heatmap view:
+ * - Hide ride-request controls and driver markers
+ * - Show heatmap controls (slider, legend)
+ * - Fetch and render heatmap data for the current hour
+ * - Preserve map center and zoom
+ */
+async function activateHeatmapView() {
+  state.heatmapView = true;
+
+  // Update nav button to indicate active state
+  if (heatmapNavBtn) {
+    heatmapNavBtn.classList.add("is-active");
+    heatmapNavBtn.textContent = "Exit Heatmap";
+  }
+
+  // Hide ride-request controls
+  const requestSection = document.querySelector('[data-mobile-section="request"]');
+  const driverSection = document.querySelector('[data-mobile-section="driver"]');
+  if (requestSection) requestSection.style.display = "none";
+  if (driverSection) driverSection.style.display = "none";
+
+  // Hide driver markers by removing driverLayer from map
+  if (map.hasLayer(driverLayer)) {
+    map.removeLayer(driverLayer);
+  }
+
+  // Add heatmap controls to the map (slider and legend will be populated by tasks 4.1/4.2)
+  if (state.heatmapSliderControl) {
+    state.heatmapSliderControl.addTo(map);
+  }
+  if (state.heatmapLegendControl) {
+    state.heatmapLegendControl.addTo(map);
+  }
+
+  // Hide the default map legend
+  if (mapLegendControl && mapLegendControl._container) {
+    mapLegendControl._container.style.display = "none";
+  }
+
+  // Fetch and render heatmap data for the current hour
+  try {
+    const points = await fetchHeatmapData(state.heatmapHour);
+    if (points) {
+      renderHeatmapLayer(points);
+    }
+  } catch (error) {
+    console.error("Failed to load heatmap data on activation:", error);
+    showMapNotice("Heatmap data is unavailable. Please try again.");
+  }
+}
+
+/**
+ * Deactivate the heatmap view:
+ * - Remove heat layer from the map
+ * - Restore ride-request controls and driver markers
+ * - Remove heatmap controls (slider, legend)
+ * - Restore the default map legend
+ * - Preserve map center and zoom
+ */
+function deactivateHeatmapView() {
+  state.heatmapView = false;
+
+  // Update nav button to indicate inactive state
+  if (heatmapNavBtn) {
+    heatmapNavBtn.classList.remove("is-active");
+    heatmapNavBtn.textContent = "Booking Heatmap";
+  }
+
+  // Remove heatmap layer
+  removeHeatmapLayer();
+
+  // Remove heatmap controls from the map
+  if (state.heatmapSliderControl && state.heatmapSliderControl._map) {
+    state.heatmapSliderControl.remove();
+  }
+  if (state.heatmapLegendControl && state.heatmapLegendControl._map) {
+    state.heatmapLegendControl.remove();
+  }
+
+  // Restore ride-request controls
+  const requestSection = document.querySelector('[data-mobile-section="request"]');
+  const driverSection = document.querySelector('[data-mobile-section="driver"]');
+  if (requestSection) requestSection.style.display = "";
+  if (driverSection) driverSection.style.display = "";
+
+  // Restore driver markers by adding driverLayer back to map
+  if (!map.hasLayer(driverLayer)) {
+    driverLayer.addTo(map);
+  }
+
+  // Restore the default map legend
+  if (mapLegendControl && mapLegendControl._container) {
+    mapLegendControl._container.style.display = "";
+  }
+
+  // Refresh the map legend to show current driver counts
+  updateMapLegend();
 }

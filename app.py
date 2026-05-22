@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import importlib.util
 import json
 import math
@@ -14,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 
@@ -964,6 +965,113 @@ def is_traffic_coverage_unavailable_error(error: Exception | None) -> bool:
 SERVICE = OlongapoRouteService()
 
 
+class HeatmapDataLoader:
+    """Loads ride_hailing_dataset.csv and pre-aggregates pickup density by grid cell and hour."""
+
+    GRID_SIZE_DEGREES = 0.002
+    REQUIRED_COLUMNS = {"pickup_latitude", "pickup_longitude", "pickup_time"}
+
+    def __init__(self, csv_path: Path):
+        self.csv_path = csv_path
+        self.hourly_data: dict[int, list[dict]] = {}  # hour -> [{lat, lng, count}]
+        self.load_error: str | None = None
+        self._load_and_aggregate()
+
+    def _snap_to_grid(self, lat: float, lng: float) -> tuple[float, float]:
+        """Snap a coordinate to the center of its grid cell."""
+        grid = self.GRID_SIZE_DEGREES
+        grid_lat = (math.floor(lat / grid) + 0.5) * grid
+        grid_lng = (math.floor(lng / grid) + 0.5) * grid
+        return (round(grid_lat, 6), round(grid_lng, 6))
+
+    def _load_and_aggregate(self) -> None:
+        """Parse CSV, validate columns, skip malformed rows, aggregate into grid cells per hour."""
+        if not self.csv_path.exists():
+            self.load_error = f"Dataset file not found: {self.csv_path.name}"
+            return
+
+        try:
+            with open(self.csv_path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                if reader.fieldnames is None:
+                    self.load_error = f"Dataset file is empty: {self.csv_path.name}"
+                    return
+
+                header_set = set(reader.fieldnames)
+                missing_columns = self.REQUIRED_COLUMNS - header_set
+                if missing_columns:
+                    self.load_error = f"Dataset missing required columns: {', '.join(sorted(missing_columns))}"
+                    return
+
+                # hourly_grid: hour -> {(grid_lat, grid_lng): count}
+                hourly_grid: dict[int, dict[tuple[float, float], int]] = {}
+
+                for row_num, row in enumerate(reader, start=2):
+                    # Validate required fields are present and non-empty
+                    pickup_lat_str = row.get("pickup_latitude", "").strip()
+                    pickup_lng_str = row.get("pickup_longitude", "").strip()
+                    pickup_time_str = row.get("pickup_time", "").strip()
+
+                    if not pickup_lat_str or not pickup_lng_str or not pickup_time_str:
+                        print(f"Warning: Skipping row {row_num}: missing required field(s)", file=sys.stderr)
+                        continue
+
+                    # Validate numeric lat/lng
+                    try:
+                        lat = float(pickup_lat_str)
+                        lng = float(pickup_lng_str)
+                    except ValueError:
+                        print(f"Warning: Skipping row {row_num}: non-numeric latitude/longitude", file=sys.stderr)
+                        continue
+
+                    # Extract hour from pickup_time (HH:MM:SS format)
+                    try:
+                        hour_str = pickup_time_str.split(":")[0]
+                        hour = int(hour_str)
+                        if hour < 0 or hour > 23:
+                            print(f"Warning: Skipping row {row_num}: hour out of range ({hour})", file=sys.stderr)
+                            continue
+                    except (ValueError, IndexError):
+                        print(f"Warning: Skipping row {row_num}: invalid pickup_time format", file=sys.stderr)
+                        continue
+
+                    # Snap to grid and aggregate
+                    grid_cell = self._snap_to_grid(lat, lng)
+                    if hour not in hourly_grid:
+                        hourly_grid[hour] = {}
+                    hourly_grid[hour][grid_cell] = hourly_grid[hour].get(grid_cell, 0) + 1
+
+                # Convert aggregated grid data to list format
+                for hour in range(24):
+                    cells = hourly_grid.get(hour, {})
+                    self.hourly_data[hour] = [
+                        {"lat": cell[0], "lng": cell[1], "count": count}
+                        for cell, count in cells.items()
+                    ]
+
+        except Exception as e:  # noqa: BLE001
+            self.load_error = f"Error loading dataset: {e}"
+
+    def get_heatmap_data(self, hour: int) -> dict:
+        """Return aggregated data for a specific hour (0-23)."""
+        if self.load_error:
+            return {"error": self.load_error}
+
+        if not isinstance(hour, int) or hour < 0 or hour > 23:
+            return {"error": "Invalid hour parameter. Must be an integer between 0 and 23."}
+
+        points = self.hourly_data.get(hour, [])
+        total_bookings = sum(p["count"] for p in points)
+        return {
+            "hour": hour,
+            "points": points,
+            "totalBookings": total_bookings,
+        }
+
+
+heatmap_loader = HeatmapDataLoader(STATIC_ROOT / "ride_hailing_dataset.csv")
+
+
 class AppHandler(BaseHTTPRequestHandler):
     server_version = "OlongapoRouteFinderPython/1.0"
 
@@ -979,6 +1087,10 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/weather":
             self.handle_weather()
+            return
+
+        if parsed.path == "/api/heatmap-data":
+            self.handle_heatmap_data(parsed.query)
             return
 
         self.serve_static(parsed.path)
@@ -1020,6 +1132,58 @@ class AppHandler(BaseHTTPRequestHandler):
             self.respond_json(SERVICE.load_weather())
         except Exception as error:  # noqa: BLE001
             self.respond_error_payload(error)
+
+    def handle_heatmap_data(self, query_string: str) -> None:
+        params = parse_qs(query_string)
+        hour_values = params.get("hour", [])
+
+        if not hour_values:
+            self.respond_json(
+                {"error": "Invalid hour parameter. Must be an integer between 0 and 23."},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+
+        hour_str = hour_values[0]
+        try:
+            hour = int(hour_str)
+        except (ValueError, TypeError):
+            self.respond_json(
+                {"error": "Invalid hour parameter. Must be an integer between 0 and 23."},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+
+        if hour < 0 or hour > 23:
+            self.respond_json(
+                {"error": "Invalid hour parameter. Must be an integer between 0 and 23."},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+
+        # Check for load errors
+        if heatmap_loader.load_error:
+            if "not found" in heatmap_loader.load_error.lower():
+                self.respond_json(
+                    {"error": heatmap_loader.load_error},
+                    status=HTTPStatus.NOT_FOUND,
+                )
+                return
+            if "missing required columns" in heatmap_loader.load_error.lower():
+                self.respond_json(
+                    {"error": heatmap_loader.load_error},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            # Other load errors
+            self.respond_json(
+                {"error": heatmap_loader.load_error},
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+            return
+
+        data = heatmap_loader.get_heatmap_data(hour)
+        self.respond_json(data)
 
     def handle_nearest_road_point(self, body: dict[str, Any]) -> None:
         try:
