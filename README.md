@@ -155,19 +155,22 @@ If any of those services are slow, blocked, or rate-limited, parts of the app ma
 
 ## TomTom Traffic Note
 
-`app.js` currently contains a hard-coded `TOMTOM_API_KEY` near the top of the file. That means:
+TomTom traffic is now intended to be configured on the Python backend through an environment variable:
 
-- traffic features are controlled from the frontend
-- the key is exposed to anyone who can view the shipped JavaScript
-- teammates can run the project as-is, but this is not safe for public deployment
+- `TOMTOM_API_KEY=your_key_here`
 
-If you want to disable traffic on teammate machines, set the value to an empty string in [app.js](/E:/SaktoGov3/app.js:7):
+Example on PowerShell before starting the app:
 
-```js
-const TOMTOM_API_KEY = "";
+```powershell
+$env:TOMTOM_API_KEY="your_key_here"
+python app.py --port 8000
 ```
 
-With no key, the rest of the app still works. Only live traffic summaries are disabled.
+That means:
+
+- intelligent matching can use TomTom live traffic from the backend
+- the key is no longer exposed in shipped frontend JavaScript
+- if the key is missing or TomTom is unavailable, matching still works through heuristic traffic fallback
 
 ## How The App Works
 

@@ -4,8 +4,10 @@ import argparse
 import importlib.util
 import json
 import math
+import os
 import sys
 import threading
+import time
 from dataclasses import asdict, dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,13 +21,22 @@ from urllib.request import Request, urlopen
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
+TOMTOM_FLOW_STYLE = "relative"
+TOMTOM_FLOW_ZOOMS = [17, 15, 13]
+TOMTOM_FLOW_URL_TEMPLATE = "https://api.tomtom.com/traffic/services/4/flowSegmentData/{style}/{zoom}/json"
+# Demo fallback only. Prefer TOMTOM_API_KEY from the environment when available.
+DEFAULT_TOMTOM_API_KEY = "pShs0RI2SZVYisktzJOUCTZBGKkHmCEC"
 INITIAL_CENTER = (14.8386, 120.2842)
 STREET_EXCLUDE_REGEX = "footway|path|steps|cycleway|bridleway|corridor|construction|proposed"
 LANDMARK_QUERY_REGEX = "school|college|university|kindergarten|marketplace|townhall|courthouse|community_centre|post_office|police|fire_station|bus_station|hospital"
 LANDMARK_SHOP_REGEX = "mall|department_store|supermarket"
 LANDMARK_LEISURE_REGEX = "park|garden|sports_centre|stadium"
 LANDMARK_TOURISM_REGEX = "attraction|museum|hotel"
+TRAFFIC_NEARBY_RADIUS_METERS = 500
+TRAFFIC_CACHE_TTL_SECONDS = 45
+TRAFFIC_REQUEST_TIMEOUT_SECONDS = 8
 USER_POINT_NODE_ID = "__user_point__"
+DROPOFF_POINT_NODE_ID = "__dropoff_point__"
 STATIC_ROOT = Path(__file__).resolve().parent
 PASSENGER_DRIVER_MODULE_PATH = STATIC_ROOT / "passenger-driver.py"
 
@@ -92,6 +103,7 @@ class OlongapoRouteService:
         self.road_segments: list[RoadSegment] = []
         self.landmarks: list[Landmark] = []
         self.route_cache: dict[tuple[str, str], dict[str, Any] | None] = {}
+        self.traffic_flow_cache: dict[str, dict[str, Any]] = {}
 
     def ensure_bootstrapped(self) -> None:
         if self.boundary and self.graph and self.landmarks:
@@ -124,6 +136,7 @@ class OlongapoRouteService:
         method: str = "GET",
         headers: dict[str, str] | None = None,
         data: bytes | None = None,
+        timeout: float = 60,
     ) -> Any:
         request = Request(
             url,
@@ -135,7 +148,7 @@ class OlongapoRouteService:
             },
             data=data,
         )
-        with urlopen(request, timeout=60) as response:
+        with urlopen(request, timeout=timeout) as response:
             return json.load(response)
 
     def fetch_boundary(self) -> dict[str, Any]:
@@ -210,7 +223,209 @@ class OlongapoRouteService:
             "summary": f"{describe_weather_code(current['weather_code'], current.get('is_day', 1))}, "
             f"{round(current['temperature_2m'])} deg C, feels like {round(current['apparent_temperature'])} deg C, "
             f"wind {round(current['wind_speed_10m'])} km/h",
+            "source": "open_meteo_live",
         }
+
+    def get_tomtom_api_key(self) -> str:
+        return os.environ.get("TOMTOM_API_KEY", "").strip() or DEFAULT_TOMTOM_API_KEY
+
+    def has_live_traffic_enabled(self) -> bool:
+        return bool(self.get_tomtom_api_key())
+
+    def lookup_live_traffic(
+        self,
+        lat: float,
+        lng: float,
+        *,
+        node_id: str | None = None,
+        nearby_candidate_limit: int = 0,
+        node_index: dict[str, Node] | None = None,
+    ) -> dict[str, Any] | None:
+        self.ensure_bootstrapped()
+        api_key = self.get_tomtom_api_key()
+        if not api_key:
+            return None
+
+        candidates = self.get_traffic_candidate_points(
+            lat,
+            lng,
+            node_id=node_id,
+            nearby_candidate_limit=nearby_candidate_limit,
+            node_index=node_index,
+        )
+        last_error: Exception | None = None
+
+        for candidate in candidates:
+            for zoom in TOMTOM_FLOW_ZOOMS:
+                try:
+                    traffic = self.fetch_traffic_segment_at_zoom(
+                        candidate["lat"],
+                        candidate["lng"],
+                        zoom,
+                        api_key,
+                    )
+                    return {
+                        "traffic": traffic,
+                        "matchedPoint": {"lat": candidate["lat"], "lng": candidate["lng"]},
+                        "matchedNode": candidate.get("node"),
+                        "zoom": zoom,
+                        "source": "tomtom_live",
+                    }
+                except Exception as error:  # noqa: BLE001
+                    last_error = error
+                    if is_traffic_point_miss_error(error):
+                        break
+                    if not is_retryable_traffic_error(error):
+                        raise
+
+        if is_traffic_coverage_unavailable_error(last_error):
+            return None
+
+        if last_error:
+            raise last_error
+
+        return None
+
+    def lookup_live_traffic_samples(self, samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        results = []
+        for sample in samples:
+            lat = float(sample["lat"])
+            lng = float(sample["lng"])
+            node_id = str(sample["nodeId"]) if sample.get("nodeId") is not None else None
+            nearby_candidate_limit = int(sample.get("nearbyCandidateLimit") or 0)
+            try:
+                result = self.lookup_live_traffic(
+                    lat,
+                    lng,
+                    node_id=node_id,
+                    nearby_candidate_limit=nearby_candidate_limit,
+                )
+                if result:
+                    results.append(
+                        {
+                            **result,
+                            "error": "",
+                            "notice": "Traffic source: TomTom live traffic.",
+                        }
+                    )
+                    continue
+
+                results.append(
+                    {
+                        "traffic": None,
+                        "matchedPoint": {"lat": lat, "lng": lng},
+                        "matchedNode": None,
+                        "zoom": None,
+                        "source": "heuristic_fallback",
+                        "error": "",
+                        "notice": "Traffic source: heuristic fallback because live traffic was unavailable.",
+                    }
+                )
+            except Exception as error:  # noqa: BLE001
+                results.append(
+                    {
+                        "traffic": None,
+                        "matchedPoint": {"lat": lat, "lng": lng},
+                        "matchedNode": None,
+                        "zoom": None,
+                        "source": "heuristic_fallback",
+                        "error": str(error),
+                        "notice": "Traffic source: heuristic fallback because live traffic was unavailable.",
+                    }
+                )
+
+        return results
+
+    def get_traffic_candidate_points(
+        self,
+        lat: float,
+        lng: float,
+        *,
+        node_id: str | None = None,
+        nearby_candidate_limit: int = 0,
+        node_index: dict[str, Node] | None = None,
+    ) -> list[dict[str, Any]]:
+        working_index = node_index or self.node_index
+        candidates: list[dict[str, Any]] = [{"lat": lat, "lng": lng, "node": None}]
+        seen: set[str] = {f"point:{round(lat, 6)}:{round(lng, 6)}"}
+
+        preferred_nodes: list[Node] = []
+        if node_id:
+            preferred_node = working_index.get(str(node_id))
+            if preferred_node:
+                preferred_nodes.append(preferred_node)
+
+        nearest_node = self.get_nearest_node(lat, lng, node_index=working_index)
+        if nearest_node:
+            preferred_nodes.append(nearest_node)
+
+        for node in preferred_nodes:
+            key = f"node:{node.id}"
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append({"lat": node.lat, "lng": node.lng, "node": asdict(node)})
+
+        if not nearby_candidate_limit:
+            return candidates
+
+        nearby_nodes: list[tuple[float, Node]] = []
+        for node in working_index.values():
+            if node.id in {USER_POINT_NODE_ID, DROPOFF_POINT_NODE_ID}:
+                continue
+
+            distance = haversine_distance(Node(id="query", lat=lat, lng=lng), node)
+            if distance <= TRAFFIC_NEARBY_RADIUS_METERS:
+                nearby_nodes.append((distance, node))
+
+        nearby_nodes.sort(key=lambda item: item[0])
+        for _, node in nearby_nodes:
+            key = f"node:{node.id}"
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append({"lat": node.lat, "lng": node.lng, "node": asdict(node)})
+            if len(candidates) >= nearby_candidate_limit + 1 + len(preferred_nodes):
+                break
+
+        return candidates
+
+    def fetch_traffic_segment_at_zoom(self, lat: float, lng: float, zoom: int, api_key: str) -> dict[str, Any]:
+        cache_key = f"{round(lat, 6)}:{round(lng, 6)}:{zoom}"
+        cached = self.traffic_flow_cache.get(cache_key)
+        now = time.time()
+        if cached and (now - float(cached["timestamp"])) < TRAFFIC_CACHE_TTL_SECONDS:
+            return dict(cached["traffic"])
+
+        params = urlencode(
+            {
+                "key": api_key,
+                "point": f"{lat},{lng}",
+                "unit": "kmph",
+                "thickness": "10",
+            }
+        )
+        url = TOMTOM_FLOW_URL_TEMPLATE.replace("{style}", TOMTOM_FLOW_STYLE).replace("{zoom}", str(zoom))
+
+        try:
+            payload = self.fetch_json(
+                f"{url}?{params}",
+                timeout=TRAFFIC_REQUEST_TIMEOUT_SECONDS,
+            )
+        except HTTPError as error:
+            raise build_traffic_error(error) from error
+        except URLError as error:
+            raise RuntimeError("traffic service temporarily unavailable") from error
+
+        traffic = payload.get("flowSegmentData")
+        if not traffic:
+            raise RuntimeError("no traffic segment returned for this point")
+
+        self.traffic_flow_cache[cache_key] = {
+            "timestamp": now,
+            "traffic": dict(traffic),
+        }
+        return dict(traffic)
 
     def build_graph(self, overpass_data: dict[str, Any]) -> None:
         raw_nodes: dict[int, Node] = {}
@@ -328,12 +543,13 @@ class OlongapoRouteService:
     def is_point_inside_boundary(self, lat: float, lng: float) -> bool:
         return any(is_point_in_ring(lat, lng, ring) for ring in self.boundary_rings)
 
-    def get_nearest_node(self, lat: float, lng: float) -> Node | None:
+    def get_nearest_node(self, lat: float, lng: float, *, node_index: dict[str, Node] | None = None) -> Node | None:
         nearest_node = None
         nearest_distance = float("inf")
+        working_index = node_index or self.node_index
 
-        for node in self.node_index.values():
-            if node.id == USER_POINT_NODE_ID:
+        for node in working_index.values():
+            if node.id in {USER_POINT_NODE_ID, DROPOFF_POINT_NODE_ID}:
                 continue
 
             distance = haversine_distance(Node(id="query", lat=lat, lng=lng), node)
@@ -522,6 +738,7 @@ class OlongapoRouteService:
             "boundary": self.boundary,
             "centerPoint": self.center_point,
             "weather": weather,
+            "liveTrafficEnabled": self.has_live_traffic_enabled(),
             "graphSummary": {
                 "nodes": len(self.node_index),
                 "directedEdges": sum(len(neighbors) for neighbors in self.graph.values()),
@@ -703,6 +920,47 @@ def describe_weather_code(code: int, is_day: int = 1) -> str:
     return weather_codes.get(code, "Unknown weather")
 
 
+def build_traffic_error(error: HTTPError) -> RuntimeError:
+    details = ""
+
+    try:
+        payload = json.loads(error.read().decode("utf-8") or "{}")
+        details = str(payload.get("detailedError", {}).get("message") or payload.get("error") or "")
+    except Exception:  # noqa: BLE001
+        details = ""
+
+    if error.code == 401:
+        return RuntimeError("TomTom API key is invalid, expired, or not authorized for Traffic API")
+    if error.code == 403:
+        return RuntimeError("API key rejected or not enabled for Traffic API")
+    if "missing valid authentication credentials" in details:
+        return RuntimeError("TomTom API key is invalid, expired, or not authorized for Traffic API")
+    if error.code == 429:
+        return RuntimeError("traffic API rate limit reached")
+    if error.code == 503:
+        return RuntimeError("traffic service temporarily unavailable")
+    if error.code == 400 and details:
+        return RuntimeError(details)
+    return RuntimeError(details or f"traffic request failed with {error.code}")
+
+
+def is_retryable_traffic_error(error: Exception | None) -> bool:
+    message = str(error or "")
+    return is_traffic_point_miss_error(error) or "no traffic segment returned for this point" in message
+
+
+def is_traffic_point_miss_error(error: Exception | None) -> bool:
+    message = str(error or "")
+    return "Point too far from nearest existing segment" in message
+
+
+def is_traffic_coverage_unavailable_error(error: Exception | None) -> bool:
+    if not error:
+        return False
+    message = str(error)
+    return is_traffic_point_miss_error(error) or "no traffic segment returned for this point" in message
+
+
 SERVICE = OlongapoRouteService()
 
 
@@ -739,6 +997,10 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/intelligent-match":
             self.handle_intelligent_match(body)
+            return
+
+        if parsed.path == "/api/traffic-samples":
+            self.handle_traffic_samples(body)
             return
 
         if parsed.path == "/api/best-driver":
@@ -818,6 +1080,22 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
 
             self.respond_json(result, status=HTTPStatus.NOT_FOUND)
+        except Exception as error:  # noqa: BLE001
+            self.respond_error_payload(error)
+
+    def handle_traffic_samples(self, body: dict[str, Any]) -> None:
+        try:
+            samples = body.get("samples", [])
+            if not isinstance(samples, list):
+                self.respond_json({"error": "samples must be a list"}, status=HTTPStatus.BAD_REQUEST)
+                return
+
+            self.respond_json(
+                {
+                    "samples": SERVICE.lookup_live_traffic_samples(samples),
+                    "liveTrafficEnabled": SERVICE.has_live_traffic_enabled(),
+                }
+            )
         except Exception as error:  # noqa: BLE001
             self.respond_error_payload(error)
 

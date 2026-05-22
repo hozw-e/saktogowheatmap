@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 MATCH_DEFAULT_RADIUS_METERS = 3000
 MATCH_EXPANDED_RADIUS_METERS = 5000
 MATCH_TRAFFIC_FALLBACK_RATIO = 0.72
+MATCH_TRAFFIC_SAMPLE_COUNT = 3
 DRIVER_SPEED_KPH = 25
 USER_POINT_NODE_ID = "__user_point__"
 DROPOFF_POINT_NODE_ID = "__dropoff_point__"
@@ -27,6 +28,7 @@ def rank_drivers(
     drivers: list[dict[str, Any]],
 ) -> dict[str, Any]:
     service.ensure_bootstrapped()
+    weather_context = build_weather_context(service)
 
     pickup_snapped = service.get_nearest_road_point(pickup_lat, pickup_lng)
     if not pickup_snapped:
@@ -39,6 +41,7 @@ def rank_drivers(
             "offerTitle": "Pickup is not on a routable road",
             "offerDetail": "Choose a pickup closer to a mapped street segment inside Olongapo.",
             "statusMessage": "The pickup point could not be snapped to a routable road segment.",
+            "matchingMode": "backend_primary",
         }
 
     dropoff_snapped = service.get_nearest_road_point(dropoff_lat, dropoff_lng)
@@ -52,6 +55,7 @@ def rank_drivers(
             "offerTitle": "Drop-off is not on a routable road",
             "offerDetail": "Choose a drop-off closer to a mapped street segment inside Olongapo.",
             "statusMessage": "The drop-off point could not be snapped to a routable road segment.",
+            "matchingMode": "backend_primary",
         }
 
     graph, node_index = clone_base_graph(service)
@@ -69,9 +73,8 @@ def rank_drivers(
             "offerTitle": "Pickup and drop-off are not connected",
             "offerDetail": "Choose a different drop-off point inside the routable street network.",
             "statusMessage": "No road route was found between the pickup and drop-off points.",
+            "matchingMode": "backend_primary",
         }
-
-    weather_context = build_weather_context(service)
 
     eligible_drivers: list[dict[str, Any]] = []
     radius_meters = MATCH_DEFAULT_RADIUS_METERS
@@ -98,6 +101,7 @@ def rank_drivers(
             "offerTitle": "No driver found within service range",
             "offerDetail": "We checked 3 km first, then expanded to 5 km, but no nearby driver met the vehicle, radius, route, and availability requirements.",
             "statusMessage": "No eligible driver met the matching rules within 5 km.",
+            "matchingMode": "backend_primary",
         }
 
     baseline_candidate = get_baseline_nearest_driver(service, eligible_drivers, pickup_node)
@@ -126,6 +130,7 @@ def rank_drivers(
             "offerTitle": "No connected driver available",
             "offerDetail": "Nearby drivers passed the filters, but each one was skipped because no A* route to your pickup was found.",
             "statusMessage": "Nearby drivers were found, but none had a connected A* route to your pickup.",
+            "matchingMode": "backend_primary",
         }
 
     apply_relative_scores(ranked_candidates)
@@ -145,6 +150,11 @@ def rank_drivers(
         "rankedCandidates": ranked_candidates,
         "baselineCandidate": baseline_candidate,
         "radiusMeters": radius_meters,
+        "matchingMode": "backend_primary",
+        "trafficSource": determine_result_traffic_source(ranked_candidates),
+        "weatherSource": str(weather_context["source"]),
+        "trafficNotice": determine_result_traffic_notice(ranked_candidates),
+        "weatherNotice": str(weather_context["notice"]),
         "reasonTitle": "",
         "reasonDetail": "",
         "offerTitle": "",
@@ -193,7 +203,13 @@ def build_weather_context(service: Any) -> dict[str, float | str]:
         weather = service.load_weather()
         raw = weather.get("raw", {})
     except Exception:  # noqa: BLE001
-        return {"label": "Weather unavailable right now.", "multiplier": 1.0}
+        return {
+            "label": "Weather unavailable right now.",
+            "multiplier": 1.0,
+            "source": "weather_fallback",
+            "notice": "Weather source: fallback because live weather was unavailable.",
+            "score": 1.0,
+        }
 
     multiplier = 1.0
     precipitation = float(raw.get("precipitation", 0) or 0)
@@ -218,6 +234,9 @@ def build_weather_context(service: Any) -> dict[str, float | str]:
     return {
         "label": weather.get("summary", "Weather unavailable right now."),
         "multiplier": multiplier,
+        "source": "open_meteo_live",
+        "notice": "Weather source: Open-Meteo live weather.",
+        "score": clamp_value(1 / max(multiplier, 1), 0, 1),
     }
 
 
@@ -272,7 +291,15 @@ def evaluate_candidate(
     pickup_distance_meters = pickup_path["distance"] + start_offset_meters
     direct_distance_meters = service_distance(service, driver, pickup_node)
     weather_multiplier = float(weather_context["multiplier"])
-    traffic_ratio = estimate_traffic_ratio(pickup_distance_meters, weather_multiplier)
+    traffic_context = build_traffic_context(
+        service,
+        start_node,
+        pickup_path,
+        pickup_distance_meters,
+        node_index,
+        weather_multiplier,
+    )
+    traffic_ratio = float(traffic_context["ratio"])
     speed_kph = float(driver.get("speedKph") or DRIVER_SPEED_KPH)
     pickup_eta_minutes = get_eta_minutes(pickup_distance_meters, speed_kph, traffic_ratio, weather_multiplier)
     trip_eta_minutes = get_eta_minutes(float(trip_path["distance"]), speed_kph, traffic_ratio, weather_multiplier)
@@ -280,6 +307,8 @@ def evaluate_candidate(
     cancellation_rate = float(driver.get("cancellationRate") or 0.08)
     route_efficiency_score = clamp_value(direct_distance_meters / max(pickup_distance_meters, 1), 0, 1)
     movement_score = get_movement_score(service, driver, pickup_node, direct_distance_meters)
+    weather_score = float(weather_context["score"])
+    traffic_score = clamp_value(traffic_ratio, 0, 1)
 
     return {
         "driver": deepcopy(driver),
@@ -292,14 +321,22 @@ def evaluate_candidate(
         "tripEtaMinutes": trip_eta_minutes,
         "trafficRatio": traffic_ratio,
         "weatherMultiplier": weather_multiplier,
-        "trafficScore": clamp_value(traffic_ratio, 0, 1),
-        "weatherScore": clamp_value(1 / max(weather_multiplier, 1), 0, 1),
+        "trafficSource": str(traffic_context["source"]),
+        "trafficNotice": str(traffic_context["notice"]),
+        "trafficSamplesUsed": int(traffic_context.get("sampleCount", 0) or 0),
+        "weatherSource": str(weather_context["source"]),
+        "weatherNotice": str(weather_context["notice"]),
+        "trafficScore": traffic_score,
+        "weatherScore": weather_score,
         "ratingScore": clamp_value((rating - 4) / 1, 0, 1),
         "cancellationScore": clamp_value(1 - (cancellation_rate / 0.25), 0, 1),
         "routeEfficiencyScore": route_efficiency_score,
         "movementScore": movement_score,
         "distanceScore": 0.0,
         "finalScore": 0.0,
+        "matchingMode": "backend_primary",
+        "scoreBreakdown": {},
+        "debug": {},
         "selectionReason": "",
         "rank": 0,
     }
@@ -348,6 +385,30 @@ def apply_relative_scores(candidates: list[dict[str, Any]]) -> None:
             + (candidate["routeEfficiencyScore"] * 0.15)
             + (candidate["movementScore"] * 0.05)
         )
+        candidate["scoreBreakdown"] = {
+            "distance_score": candidate["distanceScore"],
+            "traffic_score": candidate["trafficScore"],
+            "weather_score": candidate["weatherScore"],
+            "rating_score": candidate["ratingScore"],
+            "cancellation_score": candidate["cancellationScore"],
+            "route_efficiency_score": candidate["routeEfficiencyScore"],
+            "movement_score": candidate["movementScore"],
+            "final_score": candidate["finalScore"],
+        }
+        candidate["debug"] = {
+            "traffic_ratio": candidate["trafficRatio"],
+            "traffic_source": candidate["trafficSource"],
+            "weather_multiplier": candidate["weatherMultiplier"],
+            "weather_source": candidate["weatherSource"],
+            "distance_score": candidate["distanceScore"],
+            "traffic_score": candidate["trafficScore"],
+            "weather_score": candidate["weatherScore"],
+            "rating_score": candidate["ratingScore"],
+            "cancellation_score": candidate["cancellationScore"],
+            "route_efficiency_score": candidate["routeEfficiencyScore"],
+            "movement_score": candidate["movementScore"],
+            "final_score": candidate["finalScore"],
+        }
 
 
 def build_selection_reason(candidate: dict[str, Any], baseline_candidate: dict[str, Any] | None) -> str:
@@ -359,13 +420,87 @@ def build_selection_reason(candidate: dict[str, Any], baseline_candidate: dict[s
         parts.append(f"beat the nearest baseline driver with a stronger overall score ({candidate['finalScore']:.2f})")
 
     parts.append(f"{describe_traffic_ratio(candidate['trafficRatio'])} traffic")
+    parts.append(describe_traffic_source_reason(candidate["trafficSource"]))
     parts.append(f"{describe_weather_impact(candidate['weatherMultiplier'])} weather impact")
+    parts.append(describe_weather_source_reason(candidate["weatherSource"]))
     parts.append(f"{candidate['pickupDistanceMeters'] / 1000:.2f} km routed pickup distance")
     parts.append(f"{round(candidate['routeEfficiencyScore'] * 100)}% route efficiency")
     parts.append(f"{float(candidate['driver'].get('rating') or 4.2):.2f} rating")
     parts.append(f"{format_cancellation_risk(float(candidate['driver'].get('cancellationRate') or 0.08))} cancellation risk")
     parts.append(describe_movement_behavior(candidate["driver"], candidate["movementScore"]))
     return "ETA is shown for user understanding but not scored directly. Selected because it " + ", ".join(parts) + "."
+
+
+def build_traffic_context(
+    service: Any,
+    start_node: Any,
+    pickup_path: dict[str, Any],
+    pickup_distance_meters: float,
+    node_index: dict[str, Any],
+    weather_multiplier: float,
+) -> dict[str, Any]:
+    sample_node_ids = [start_node.id, *sample_route_node_ids(pickup_path["nodeIds"], MATCH_TRAFFIC_SAMPLE_COUNT)]
+    ratios: list[float] = []
+
+    try:
+        for sample_node_id in dict.fromkeys(sample_node_ids):
+            sample_node = node_index.get(sample_node_id)
+            if not sample_node:
+                continue
+
+            result = service.lookup_live_traffic(
+                float(sample_node.lat),
+                float(sample_node.lng),
+                node_id=str(sample_node.id),
+                nearby_candidate_limit=2,
+                node_index=node_index,
+            )
+            if not result or not result.get("traffic"):
+                continue
+
+            ratios.append(get_live_traffic_ratio(result["traffic"]))
+
+        if ratios:
+            return {
+                "ratio": sum(ratios) / len(ratios),
+                "source": "tomtom_live",
+                "notice": "Traffic source: TomTom live traffic.",
+                "sampleCount": len(ratios),
+            }
+    except Exception:  # noqa: BLE001
+        pass
+
+    return {
+        "ratio": estimate_traffic_ratio(pickup_distance_meters, weather_multiplier),
+        "source": "heuristic_fallback",
+        "notice": "Traffic source: heuristic fallback because live traffic was unavailable.",
+        "sampleCount": 0,
+    }
+
+
+def sample_route_node_ids(node_ids: list[str], max_samples: int) -> list[str]:
+    if not node_ids or max_samples <= 0:
+        return []
+    if len(node_ids) <= max_samples:
+        return list(node_ids)
+
+    sampled = []
+    step = (len(node_ids) - 1) / max(max_samples - 1, 1)
+    for index in range(max_samples):
+        sampled.append(node_ids[round(index * step)])
+    return list(dict.fromkeys(sampled))
+
+
+def get_live_traffic_ratio(traffic: dict[str, Any]) -> float:
+    free_flow_speed = max(float(traffic.get("freeFlowSpeed") or 0), 1.0)
+    current_speed = max(float(traffic.get("currentSpeed") or 0), 0.0)
+    raw_ratio = current_speed / free_flow_speed
+
+    if traffic.get("roadClosure"):
+        return 0.15
+    if raw_ratio <= 0.30:
+        return 0.15
+    return clamp_value(raw_ratio, 0.15, 1.0)
 
 
 def estimate_traffic_ratio(pickup_distance_meters: float, weather_multiplier: float) -> float:
@@ -461,6 +596,28 @@ def describe_movement_behavior(driver: dict[str, Any], movement_score: float) ->
     if movement_score >= 0.95:
         return "movement already trending toward the pickup"
     return "movement direction less favorable than the top candidates"
+
+
+def describe_traffic_source_reason(source: str) -> str:
+    if source == "tomtom_live":
+        return "used TomTom live traffic"
+    return "used heuristic traffic fallback"
+
+
+def describe_weather_source_reason(source: str) -> str:
+    if source == "open_meteo_live":
+        return "used Open-Meteo live weather"
+    return "used weather fallback"
+
+
+def determine_result_traffic_source(candidates: list[dict[str, Any]]) -> str:
+    return "tomtom_live" if any(candidate.get("trafficSource") == "tomtom_live" for candidate in candidates) else "heuristic_fallback"
+
+
+def determine_result_traffic_notice(candidates: list[dict[str, Any]]) -> str:
+    if any(candidate.get("trafficSource") == "tomtom_live" for candidate in candidates):
+        return "Traffic source: TomTom live traffic."
+    return "Traffic source: heuristic fallback because live traffic was unavailable."
 
 
 def describe_traffic_ratio(ratio: float) -> str:

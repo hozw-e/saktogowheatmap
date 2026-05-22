@@ -443,6 +443,47 @@ button {
   margin-top: 14px;
 }
 
+.matcher-source-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.matcher-source-row:empty {
+  display: none;
+}
+
+.matcher-source-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(84, 104, 90, 0.12);
+  color: var(--ink);
+  font-size: 0.84rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.matcher-source-badge--live {
+  background: rgba(213, 239, 228, 0.95);
+  border-color: rgba(11, 110, 79, 0.22);
+  color: var(--accent-strong);
+}
+
+.matcher-source-badge--fallback {
+  background: rgba(255, 243, 232, 0.95);
+  border-color: rgba(192, 92, 52, 0.18);
+  color: var(--warn);
+}
+
+.matcher-source-badge--mode {
+  background: rgba(23, 51, 38, 0.08);
+  border-color: rgba(84, 104, 90, 0.12);
+}
+
 .offer-card .action-btn,
 .offer-card .ghost-btn {
   flex: 1 1 140px;

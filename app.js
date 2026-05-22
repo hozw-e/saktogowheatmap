@@ -1,10 +1,6 @@
 const NOMINATIM_URL = "https://nominatim.openstreetmap.org/search";
 const OVERPASS_URL = "https://overpass-api.de/api/interpreter";
 const OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast";
-const TOMTOM_FLOW_STYLE = "relative";
-const TOMTOM_FLOW_ZOOMS = [17, 15, 13];
-const TOMTOM_FLOW_URL_TEMPLATE = "https://api.tomtom.com/traffic/services/4/flowSegmentData/{style}/{zoom}/json";
-const TOMTOM_API_KEY = "pShs0RI2SZVYisktzJOUCTZBGKkHmCEC";
 const INITIAL_CENTER = [14.8386, 120.2842];
 const INITIAL_ZOOM = 13;
 const STREET_EXCLUDE_REGEX = "footway|path|steps|cycleway|bridleway|corridor|construction|proposed";
@@ -12,6 +8,7 @@ const OLONGAPO_TIMEZONE = "Asia/Manila";
 const TRAFFIC_POINT_NEARBY_CANDIDATES = 4;
 const TRAFFIC_ROUTE_NEARBY_CANDIDATES = 2;
 const TRAFFIC_NEARBY_RADIUS_METERS = 500;
+const MATCH_DEBUG_ENABLED = new URLSearchParams(window.location.search).has("debugMatch");
 const DRIVER_TOTAL = 100;
 const DRIVER_CAR_COUNT = 60;
 const DRIVER_MOTORCYCLE_COUNT = 40;
@@ -60,6 +57,7 @@ const requestHintText = document.getElementById("request-hint-text");
 const selectionGuideText = document.getElementById("selection-guide-text");
 const offerTitleText = document.getElementById("offer-title-text");
 const offerDetailText = document.getElementById("offer-detail-text");
+const matcherSourceRow = document.getElementById("matcher-source-row");
 const offerScoreText = document.getElementById("offer-score-text");
 const offerEtaText = document.getElementById("offer-eta-text");
 const offerBaselineText = document.getElementById("offer-baseline-text");
@@ -154,9 +152,12 @@ const state = {
   appReady: false,
   weatherContext: {
     label: "Weather unavailable right now.",
-    multiplier: 1
+    multiplier: 1,
+    source: "weather_fallback",
+    notice: "Weather source: fallback because live weather was unavailable."
   },
   backendSupportsIntelligentMatch: true,
+  backendSupportsTrafficProxy: false,
   centerPoint: {
     lat: INITIAL_CENTER[0],
     lng: INITIAL_CENTER[1]
@@ -225,6 +226,8 @@ function syncShellPlacement(mode) {
 
   if (phoneFrame) {
     phoneFrame.hidden = mode !== "user";
+    phoneFrame.inert = mode !== "user";
+    phoneFrame.setAttribute("aria-hidden", mode === "user" ? "false" : "true");
   }
 
   desktopShellHost.hidden = mode === "user";
@@ -581,6 +584,9 @@ function clearOfferMatchSummary() {
   if (offerEtaText) offerEtaText.textContent = "--";
   if (offerBaselineText) offerBaselineText.textContent = "--";
   if (offerBaselineDistanceText) offerBaselineDistanceText.textContent = "--";
+  if (matcherSourceRow) {
+    matcherSourceRow.replaceChildren();
+  }
   if (offerReasonList) {
     offerReasonList.replaceChildren();
   }
@@ -604,6 +610,7 @@ function renderOfferMatchSummary(offer) {
   if (offerEtaText) offerEtaText.textContent = etaText;
   if (offerBaselineText) offerBaselineText.textContent = baselineDriverText;
   if (offerBaselineDistanceText) offerBaselineDistanceText.textContent = baselineDistanceText;
+  renderMatcherSourceBadges(offer);
 
   if (!offerReasonList) {
     return;
@@ -618,10 +625,55 @@ function renderOfferMatchSummary(offer) {
   offerReasonList.replaceChildren(...nodes);
 }
 
+function renderMatcherSourceBadges(offer) {
+  if (!matcherSourceRow) {
+    return;
+  }
+
+  const badges = [];
+  const modeLabel = offer.matchingMode === "browser_fallback"
+    ? "Matcher: Browser fallback"
+    : "Matcher: Backend primary";
+  badges.push(createMatcherSourceBadge(modeLabel, "matcher-source-badge matcher-source-badge--mode"));
+
+  if (offer.trafficSource) {
+    const trafficLabel = offer.trafficSource === "tomtom_live"
+      ? "Traffic: TomTom live"
+      : "Traffic: Heuristic fallback";
+    const trafficClass = offer.trafficSource === "tomtom_live"
+      ? "matcher-source-badge matcher-source-badge--live"
+      : "matcher-source-badge matcher-source-badge--fallback";
+    badges.push(createMatcherSourceBadge(trafficLabel, trafficClass));
+  }
+
+  if (offer.weatherSource) {
+    const weatherLabel = offer.weatherSource === "open_meteo_live"
+      ? "Weather: Open-Meteo live"
+      : "Weather: Fallback";
+    const weatherClass = offer.weatherSource === "open_meteo_live"
+      ? "matcher-source-badge matcher-source-badge--live"
+      : "matcher-source-badge matcher-source-badge--fallback";
+    badges.push(createMatcherSourceBadge(weatherLabel, weatherClass));
+  }
+
+  matcherSourceRow.replaceChildren(...badges);
+}
+
+function createMatcherSourceBadge(label, className) {
+  const badge = document.createElement("span");
+  badge.className = className;
+  badge.textContent = label;
+  return badge;
+}
+
 function buildOfferReasonItems(offer) {
   const items = [];
 
   items.push("ETA is shown for clarity only and is not part of the score.");
+
+  if (offer.matchingMode === "browser_fallback") {
+    items.push("Matching mode: browser fallback mode.");
+  }
 
   if (state.baselineNearestSuggestion) {
     const baseline = state.baselineNearestSuggestion;
@@ -636,8 +688,20 @@ function buildOfferReasonItems(offer) {
     items.push(`Traffic: ${describeTrafficRatio(offer.trafficRatio)}.`);
   }
 
+  if (offer.trafficNotice) {
+    items.push(offer.trafficNotice.endsWith(".") ? offer.trafficNotice : `${offer.trafficNotice}.`);
+  } else if (offer.trafficSource) {
+    items.push(`Traffic source: ${describeTrafficSource(offer.trafficSource)}.`);
+  }
+
   if (typeof offer.weatherMultiplier === "number") {
     items.push(`Weather: ${formatWeatherScoreLabel(offer.weatherMultiplier)}.`);
+  }
+
+  if (offer.weatherNotice) {
+    items.push(offer.weatherNotice.endsWith(".") ? offer.weatherNotice : `${offer.weatherNotice}.`);
+  } else if (offer.weatherSource) {
+    items.push(`Weather source: ${describeWeatherSource(offer.weatherSource)}.`);
   }
 
   if (typeof offer.pickupDistanceMeters === "number") {
@@ -830,7 +894,7 @@ function normalizeUiCopy() {
     .replaceAll("â€", '"')
     .replaceAll("“", '"')
     .replaceAll("”", '"');
-  for (const target of [offerDetailText, offerComparisonText, offerReasonText]) {
+  for (const target of [offerDetailText, offerTitleText]) {
     target.textContent = target.textContent
       .replaceAll("â€¢", "|")
       .replaceAll("•", "|");
@@ -919,7 +983,8 @@ function applyBootstrapPayload(payload) {
   applyBoundary(payload.boundary);
   buildGraphFromPayload(payload.nodes || [], payload.graph || {}, payload.roads || []);
   loadLandmarksFromPayload(payload.landmarks || []);
-  setWeatherText(payload.weather?.summary || "Weather unavailable right now.");
+  applyWeatherPayload(payload.weather || null);
+  state.backendSupportsTrafficProxy = Object.prototype.hasOwnProperty.call(payload || {}, "liveTrafficEnabled");
 }
 
 async function fetchBoundary() {
@@ -1759,6 +1824,11 @@ async function prepareDriverSuggestion() {
     state.suggestionCursor = 0;
     state.baselineNearestSuggestion = ranking.baselineCandidate;
     state.suggestionSearchRadiusMeters = ranking.radiusMeters;
+    if (MATCH_DEBUG_ENABLED) {
+      for (const candidate of ranking.rankedCandidates || []) {
+        console.debug(`Driver ${candidate.driver?.id} intelligent-match debug`, candidate.debug || {});
+      }
+    }
 
     if (!ranking.rankedCandidates.length) {
       routeLayer.clearLayers();
@@ -1791,45 +1861,54 @@ async function prepareDriverSuggestion() {
 }
 
 async function fetchBackendDriverSuggestion(tripPath) {
-  const response = await fetch("/api/intelligent-match", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "application/json"
-    },
-    body: JSON.stringify({
-      pickup: {
-        lat: state.userPoint.lat,
-        lng: state.userPoint.lng
-      },
-      dropoff: {
-        lat: state.dropoffPoint.lat,
-        lng: state.dropoffPoint.lng
-      },
-      vehicleType: state.selectedVehicleType,
-      drivers: state.drivers.map(serializeDriverForMatching)
-    })
-  });
-
-  let payload = null;
   try {
-    payload = await response.json();
-  } catch (error) {
-    payload = null;
-  }
+    const response = await fetch("/api/intelligent-match", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      },
+      body: JSON.stringify({
+        pickup: {
+          lat: state.userPoint.lat,
+          lng: state.userPoint.lng
+        },
+        dropoff: {
+          lat: state.dropoffPoint.lat,
+          lng: state.dropoffPoint.lng
+        },
+        vehicleType: state.selectedVehicleType,
+        drivers: state.drivers.map(serializeDriverForMatching)
+      })
+    });
 
-  if (response.status === 404) {
-    state.backendSupportsIntelligentMatch = false;
-    setStatus("The running Python server does not have /api/intelligent-match yet. Using browser fallback for driver ranking.");
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (error) {
+      payload = null;
+    }
+
+    if (response.status === 404) {
+      state.backendSupportsIntelligentMatch = false;
+      setStatus("The running Python server does not have /api/intelligent-match yet. Using browser fallback mode for driver ranking.");
+      return buildDriverSuggestionRanking(tripPath);
+    }
+
+    if (!response.ok && !Array.isArray(payload?.rankedCandidates)) {
+      console.warn("Backend intelligent match failed, switching to browser fallback mode.", payload?.error || response.status);
+      setStatus("Backend intelligent matching is unavailable right now. Using browser fallback mode.");
+      return buildDriverSuggestionRanking(tripPath);
+    }
+
+    state.backendSupportsIntelligentMatch = true;
+    payload.matchingMode = payload.matchingMode || "backend_primary";
+    return payload;
+  } catch (error) {
+    console.warn("Backend intelligent match request failed, switching to browser fallback mode.", error);
+    setStatus("Backend intelligent matching is unavailable right now. Using browser fallback mode.");
     return buildDriverSuggestionRanking(tripPath);
   }
-
-  if (!response.ok && !Array.isArray(payload?.rankedCandidates)) {
-    throw new Error(payload?.error || payload?.offerDetail || `Backend intelligent match failed with ${response.status}`);
-  }
-
-  state.backendSupportsIntelligentMatch = true;
-  return payload;
 }
 
 function serializeDriverForMatching(driver) {
@@ -1940,6 +2019,11 @@ async function buildDriverSuggestionRanking(tripPath) {
       rankedCandidates: [],
       baselineCandidate: null,
       radiusMeters,
+      matchingMode: "browser_fallback",
+      trafficSource: "heuristic_fallback",
+      weatherSource: state.weatherContext?.source || "weather_fallback",
+      trafficNotice: "Traffic source: heuristic fallback because live traffic was unavailable.",
+      weatherNotice: state.weatherContext?.notice || "Weather source: fallback because live weather was unavailable.",
       reasonTitle: "No nearby eligible driver",
       reasonDetail: `No ${state.selectedVehicleType === "car" ? "car" : "motorcycle"} driver passed the quality checks within 5.0 km.`,
       offerTitle: "No driver found within service range",
@@ -1961,6 +2045,11 @@ async function buildDriverSuggestionRanking(tripPath) {
       rankedCandidates: [],
       baselineCandidate,
       radiusMeters,
+      matchingMode: "browser_fallback",
+      trafficSource: "heuristic_fallback",
+      weatherSource: state.weatherContext?.source || "weather_fallback",
+      trafficNotice: "Traffic source: heuristic fallback because live traffic was unavailable.",
+      weatherNotice: state.weatherContext?.notice || "Weather source: fallback because live weather was unavailable.",
       reasonTitle: "No connected driver",
       reasonDetail: "Nearby drivers were found, but none had a connected A* pickup route.",
       offerTitle: "No connected driver available",
@@ -1991,6 +2080,13 @@ async function buildDriverSuggestionRanking(tripPath) {
     rankedCandidates,
     baselineCandidate,
     radiusMeters,
+    matchingMode: "browser_fallback",
+    trafficSource: rankedCandidates.some((candidate) => candidate.trafficSource === "tomtom_live")
+      ? "tomtom_live"
+      : "heuristic_fallback",
+    weatherSource: state.weatherContext?.source || "weather_fallback",
+    trafficNotice: "Traffic source: heuristic fallback because live traffic was unavailable.",
+    weatherNotice: state.weatherContext?.notice || "Weather source: fallback because live weather was unavailable.",
     reasonTitle: "",
     reasonDetail: "",
     offerTitle: "",
@@ -2041,11 +2137,15 @@ async function evaluateDriverCandidate(driver, tripPath) {
   const startOffsetMeters = haversineDistance(driver, startNode);
   const pickupDistanceMeters = pickupPath.distance + startOffsetMeters;
   const directDistanceMeters = haversineDistance(driver, state.userPoint);
-  const trafficRatio = await estimateDriverTrafficRatio(startNode, pickupPath.nodeIds);
+  const trafficContext = estimateDriverTrafficFallbackContext(pickupDistanceMeters, state.weatherContext?.multiplier || 1);
+  const trafficRatio = trafficContext.ratio;
   const weatherMultiplier = state.weatherContext?.multiplier || 1;
+  const weatherSource = state.weatherContext?.source || "weather_fallback";
   const speedKph = driver.speedKph || DRIVER_SPEED_KPH;
   const pickupEtaMinutes = getEtaMinutes(pickupDistanceMeters, speedKph, trafficRatio, weatherMultiplier);
   const tripEtaMinutes = getEtaMinutes(tripPath.distance, speedKph, trafficRatio, weatherMultiplier);
+  const weatherScore = clampValue(1 / Math.max(weatherMultiplier, 1), 0, 1);
+  const trafficScore = clampValue(trafficRatio, 0, 1);
 
   return {
     driver,
@@ -2057,42 +2157,33 @@ async function evaluateDriverCandidate(driver, tripPath) {
     pickupEtaMinutes,
     tripEtaMinutes,
     trafficRatio,
+    trafficSource: trafficContext.source,
+    trafficNotice: trafficContext.notice,
     weatherMultiplier,
-    trafficScore: clampValue(trafficRatio, 0, 1),
-    weatherScore: clampValue(1 / Math.max(weatherMultiplier, 1), 0, 1),
+    weatherSource,
+    weatherNotice: state.weatherContext?.notice || "Weather source: fallback because live weather was unavailable.",
+    trafficScore,
+    weatherScore,
     ratingScore: clampValue((driver.rating - 4) / 1, 0, 1),
     cancellationScore: clampValue(1 - (driver.cancellationRate / 0.25), 0, 1),
     routeEfficiencyScore: clampValue(directDistanceMeters / Math.max(pickupDistanceMeters, 1), 0, 1),
     movementScore: getDriverMovementScore(driver),
     distanceScore: 0,
     finalScore: 0,
+    matchingMode: "browser_fallback",
+    scoreBreakdown: {},
+    debug: {},
     selectionReason: "",
     rank: 0
   };
 }
 
-async function estimateDriverTrafficRatio(startNode, routeNodeIds) {
-  if (!TOMTOM_API_KEY) {
-    return MATCH_TRAFFIC_FALLBACK_RATIO;
-  }
-
-  const routeCandidates = [startNode.id, ...sampleRouteNodeIds(routeNodeIds, 2)];
-  const sampleNodeIds = [...new Set(routeCandidates)];
-  const results = await Promise.allSettled(
-    sampleNodeIds
-      .map((nodeId) => state.nodeIndex.get(nodeId))
-      .filter(Boolean)
-      .map((node) => fetchTrafficForNode(node, TRAFFIC_ROUTE_NEARBY_CANDIDATES))
-  );
-  const ratios = results
-    .filter((result) => result.status === "fulfilled" && result.value?.traffic)
-    .map((result) => getTrafficRatioFromSegment(result.value.traffic));
-
-  if (!ratios.length) {
-    return MATCH_TRAFFIC_FALLBACK_RATIO;
-  }
-
-  return ratios.reduce((sum, ratio) => sum + ratio, 0) / ratios.length;
+function estimateDriverTrafficFallbackContext(pickupDistanceMeters, weatherMultiplier) {
+  return {
+    ratio: estimateHeuristicTrafficRatio(pickupDistanceMeters, weatherMultiplier),
+    source: "heuristic_fallback",
+    notice: "Traffic source: heuristic fallback because live traffic was unavailable."
+  };
 }
 
 function getTrafficRatioFromSegment(traffic) {
@@ -2105,6 +2196,23 @@ function getTrafficRatioFromSegment(traffic) {
   }
 
   return clampValue(traffic.currentSpeed / Math.max(traffic.freeFlowSpeed, 1), 0.15, 1);
+}
+
+function estimateHeuristicTrafficRatio(pickupDistanceMeters, weatherMultiplier) {
+  const currentHour = getManilaHourValue();
+  let baseRatio = 0.86;
+
+  if (currentHour >= 7 && currentHour < 10 || currentHour >= 16 && currentHour < 20) {
+    baseRatio = 0.58;
+  } else if (currentHour >= 10 && currentHour < 16) {
+    baseRatio = 0.72;
+  } else if (currentHour >= 5 && currentHour < 7 || currentHour >= 20 && currentHour < 22) {
+    baseRatio = 0.66;
+  }
+
+  const distancePenalty = Math.min((pickupDistanceMeters / 1000) * 0.015, 0.08);
+  const weatherPenalty = Math.min(Math.max(weatherMultiplier - 1, 0) * 0.18, 0.12);
+  return clampValue(baseRatio - distancePenalty - weatherPenalty, 0.15, 1);
 }
 
 function getEtaMinutes(distanceMeters, speedKph, trafficRatio, weatherMultiplier) {
@@ -2144,6 +2252,30 @@ function applyRelativeScoresToCandidates(candidates) {
       + (candidate.routeEfficiencyScore * 0.15)
       + (candidate.movementScore * 0.05)
     );
+    candidate.scoreBreakdown = {
+      distance_score: candidate.distanceScore,
+      traffic_score: candidate.trafficScore,
+      weather_score: candidate.weatherScore,
+      rating_score: candidate.ratingScore,
+      cancellation_score: candidate.cancellationScore,
+      route_efficiency_score: candidate.routeEfficiencyScore,
+      movement_score: candidate.movementScore,
+      final_score: candidate.finalScore
+    };
+    candidate.debug = {
+      traffic_ratio: candidate.trafficRatio,
+      traffic_source: candidate.trafficSource,
+      weather_multiplier: candidate.weatherMultiplier,
+      weather_source: candidate.weatherSource,
+      distance_score: candidate.distanceScore,
+      traffic_score: candidate.trafficScore,
+      weather_score: candidate.weatherScore,
+      rating_score: candidate.ratingScore,
+      cancellation_score: candidate.cancellationScore,
+      route_efficiency_score: candidate.routeEfficiencyScore,
+      movement_score: candidate.movementScore,
+      final_score: candidate.finalScore
+    };
   }
 }
 
@@ -2165,7 +2297,9 @@ function buildDriverSelectionReason(candidate, baselineCandidate) {
   }
 
   reasonParts.push(`${describeTrafficRatio(candidate.trafficRatio)} traffic`);
+  reasonParts.push(candidate.trafficSource === "tomtom_live" ? "used TomTom live traffic" : "used heuristic traffic fallback");
   reasonParts.push(`${formatWeatherScoreLabel(candidate.weatherMultiplier)} weather impact`);
+  reasonParts.push(candidate.weatherSource === "open_meteo_live" ? "used Open-Meteo live weather" : "used weather fallback");
   reasonParts.push(`${(candidate.pickupDistanceMeters / 1000).toFixed(2)} km routed pickup distance`);
   reasonParts.push(`${Math.round(candidate.routeEfficiencyScore * 100)}% route efficiency`);
   reasonParts.push(`${candidate.driver.rating.toFixed(2)} rating`);
@@ -2190,6 +2324,7 @@ function presentRankedDriverSuggestion() {
     state.pendingDriverOffer = rankedCandidate;
     state.userPanelTab = "driver";
     holdDriverForOffer(liveDriver);
+    syncPendingDriverOfferToHeldDriver(rankedCandidate);
     drawSuggestedDriverPreview(liveDriver, rankedCandidate.startNode, rankedCandidate.pickupPath, rankedCandidate.tripPath);
     updateSuggestedDriverInfo(rankedCandidate);
     return true;
@@ -2292,6 +2427,38 @@ function isDriverAvailableForMatching(driver) {
     && (driver.status === "standby_available" || driver.status === "moving_available");
 }
 
+function syncPendingDriverOfferToHeldDriver(offer) {
+  if (!offer?.driver || !state.userPoint) {
+    return offer;
+  }
+
+  const actualStartNode = getDriverRouteStartNode(offer.driver);
+  if (!actualStartNode) {
+    return offer;
+  }
+
+  const actualPickupPath = getPathBetweenNodes(actualStartNode.id, state.userPoint.id);
+  if (!actualPickupPath) {
+    return offer;
+  }
+
+  const startOffsetMeters = haversineDistance(offer.driver, actualStartNode);
+  const pickupDistanceMeters = actualPickupPath.distance + startOffsetMeters;
+  const speedKph = offer.driver.speedKph || DRIVER_SPEED_KPH;
+
+  offer.startNode = actualStartNode;
+  offer.pickupPath = actualPickupPath;
+  offer.pickupDistanceMeters = pickupDistanceMeters;
+  offer.pickupEtaMinutes = getEtaMinutes(
+    pickupDistanceMeters,
+    speedKph,
+    offer.trafficRatio || MATCH_TRAFFIC_FALLBACK_RATIO,
+    offer.weatherMultiplier || 1
+  );
+
+  return offer;
+}
+
 function buildRouteLine(startLatLng, startNode, path) {
   const line = [startLatLng];
   const startPoint = [startNode.lat, startNode.lng];
@@ -2344,13 +2511,26 @@ function updateSuggestedDriverInfoLegacy(driver, pickupPath, tripPath) {
 
 function updateSuggestedDriverInfo(offer) {
   const { driver, tripPath, pickupDistanceMeters, pickupEtaMinutes, tripEtaMinutes } = offer;
+  const offerModePrefix = offer.matchingMode === "browser_fallback"
+    ? "Browser fallback mode. "
+    : "";
+  const environmentFlags = [];
+  if (offer.trafficSource === "heuristic_fallback") {
+    environmentFlags.push("traffic fallback active");
+  }
+  if (offer.weatherSource === "weather_fallback") {
+    environmentFlags.push("weather fallback active");
+  }
+  const environmentSuffix = environmentFlags.length
+    ? ` ${environmentFlags.join(", ")}.`
+    : "";
   bestDriverText.textContent = `Driver ${driver.id} (${driver.type === "car" ? "car" : "motorcycle"})`;
   driverTrafficText.textContent = `ETA ${pickupEtaMinutes} min | ${(pickupDistanceMeters / 1000).toFixed(2)} km to pickup | rating ${driver.rating.toFixed(2)} | cancellation ${formatCancellationRisk(driver.cancellationRate)}`;
   routeText.textContent = `Trip preview: ${(tripPath.distance / 1000).toFixed(2)} km, about ${tripEtaMinutes} min after pickup`;
   routeTrafficText.textContent = "Route traffic: preview only until you accept this driver";
   updateOfferCard(
     `Driver ${driver.id} is ready for review`,
-    `${driver.type === "car" ? "Car" : "Motorcycle"} match. ETA ${pickupEtaMinutes} min, ${(pickupDistanceMeters / 1000).toFixed(2)} km to pickup, ${(tripPath.distance / 1000).toFixed(2)} km after pickup.`
+    `${offerModePrefix}${driver.type === "car" ? "Car" : "Motorcycle"} match. ETA ${pickupEtaMinutes} min, ${(pickupDistanceMeters / 1000).toFixed(2)} km to pickup, ${(tripPath.distance / 1000).toFixed(2)} km after pickup.${environmentSuffix}`
   );
   renderOfferMatchSummary(offer);
   setStatus(`Suggested Driver ${driver.id}. Review the driver profile before dispatch.`);
@@ -3530,6 +3710,13 @@ function formatWeatherScoreLabel(weatherMultiplier) {
   return "strong";
 }
 
+function describeWeatherSource(source) {
+  if (source === "open_meteo_live") {
+    return "Open-Meteo live weather";
+  }
+  return "fallback because live weather was unavailable";
+}
+
 function describeMovementBehavior(driver, movementScore) {
   if (driver.status === "standby_available") {
     return "stable standby positioning";
@@ -3580,16 +3767,14 @@ async function loadWeather(boundary) {
       }
 
       const payload = await response.json();
-      state.weatherContext = {
-        label: payload.summary || "Weather unavailable right now.",
-        multiplier: 1
-      };
-      setWeatherText(payload.summary || "Weather unavailable right now.");
+      applyWeatherPayload(payload);
     } catch (error) {
       console.error(error);
       state.weatherContext = {
         label: "Weather unavailable right now.",
-        multiplier: 1
+        multiplier: 1,
+        source: "weather_fallback",
+        notice: "Weather source: fallback because live weather was unavailable."
       };
       setWeatherText("Weather unavailable right now.");
     }
@@ -3629,13 +3814,34 @@ async function loadWeather(boundary) {
     console.error(error);
     state.weatherContext = {
       label: "Weather unavailable right now.",
-      multiplier: 1
+      multiplier: 1,
+      source: "weather_fallback",
+      notice: "Weather source: fallback because live weather was unavailable."
     };
     setWeatherText("Weather unavailable right now.");
   }
 }
 
-function buildWeatherContext(current, weatherLabel) {
+function applyWeatherPayload(payload) {
+  if (!payload?.raw) {
+    state.weatherContext = {
+      label: payload?.summary || "Weather unavailable right now.",
+      multiplier: 1,
+      source: payload?.source || "weather_fallback",
+      notice: payload?.source === "open_meteo_live"
+        ? "Weather source: Open-Meteo live weather."
+        : "Weather source: fallback because live weather was unavailable."
+    };
+    setWeatherText(payload?.summary || "Weather unavailable right now.");
+    return;
+  }
+
+  const weatherLabel = describeWeatherCode(payload.raw.weather_code, payload.raw.is_day);
+  state.weatherContext = buildWeatherContext(payload.raw, weatherLabel, payload.source || "open_meteo_live");
+  setWeatherText(payload.summary || "Weather unavailable right now.");
+}
+
+function buildWeatherContext(current, weatherLabel, source = "open_meteo_live") {
   let multiplier = 1;
 
   if ((current.precipitation || 0) >= 5) {
@@ -3658,7 +3864,11 @@ function buildWeatherContext(current, weatherLabel) {
 
   return {
     label: weatherLabel,
-    multiplier
+    multiplier,
+    source,
+    notice: source === "open_meteo_live"
+      ? "Weather source: Open-Meteo live weather."
+      : "Weather source: fallback because live weather was unavailable."
   };
 }
 
@@ -3673,8 +3883,8 @@ async function loadTrafficForPoint(pointLabel, node) {
       ? dropoffTrafficText
       : driverTrafficText;
 
-  if (!TOMTOM_API_KEY) {
-    target.textContent = "Traffic: add a TomTom API key in app.js to enable live street traffic";
+  if (!node) {
+    target.textContent = "Traffic: unavailable for this point";
     return;
   }
 
@@ -3683,45 +3893,45 @@ async function loadTrafficForPoint(pointLabel, node) {
   try {
     const result = await fetchTrafficForNode(node, TRAFFIC_POINT_NEARBY_CANDIDATES);
     if (!result?.traffic) {
-      target.textContent = "Traffic: unavailable near this road right now";
+      target.textContent = result?.notice || "Traffic: unavailable near this road right now";
       return;
     }
     target.textContent = formatTrafficLookupResult(result, node);
   } catch (error) {
-    if (!isTrafficCoverageUnavailableError(error)) {
-      console.error(error);
-    }
-    target.textContent = isTrafficCoverageUnavailableError(error)
-      ? "Traffic: unavailable near this road right now"
-      : `Traffic: ${error.message || "unavailable for this point"}`;
+    console.error(error);
+    target.textContent = `Traffic: ${error.message || "unavailable for this point"}`;
   }
 }
 
 async function loadRouteTrafficSummary(nodeIds) {
-  if (!TOMTOM_API_KEY) {
-    routeTrafficText.textContent = "Route traffic: add a TomTom API key in app.js to enable live traffic";
-    return;
-  }
-
   routeTrafficText.textContent = "Route traffic: loading...";
 
   const sampleIds = sampleRouteNodeIds(nodeIds, 6);
-  const results = await Promise.allSettled(
-    sampleIds.map((nodeId) => fetchTrafficForNode(state.nodeIndex.get(nodeId), TRAFFIC_ROUTE_NEARBY_CANDIDATES))
+  const sampleNodes = sampleIds
+    .map((nodeId) => state.nodeIndex.get(nodeId))
+    .filter(Boolean);
+
+  if (!sampleNodes.length) {
+    routeTrafficText.textContent = "Route traffic: unavailable near this route right now";
+    return;
+  }
+
+  const results = await fetchTrafficSamplesFromBackend(
+    sampleNodes.map((node) => ({
+      nodeId: node.id,
+      lat: node.lat,
+      lng: node.lng,
+      nearbyCandidateLimit: TRAFFIC_ROUTE_NEARBY_CANDIDATES
+    }))
   );
 
   const validSamples = results
-    .filter((result) => result.status === "fulfilled" && result.value)
-    .map((result) => result.value.traffic);
+    .filter((result) => result?.traffic)
+    .map((result) => result.traffic);
 
   if (!validSamples.length) {
-    const firstFailure = results.find((result) => result.status === "rejected");
-    const reason = firstFailure && firstFailure.reason
-      ? firstFailure.reason.message
-      : "no live traffic samples returned";
-    routeTrafficText.textContent = isTrafficCoverageUnavailableError(firstFailure?.reason)
-      ? "Route traffic: unavailable near this route right now"
-      : `Route traffic: ${reason}`;
+    const fallbackNotice = results.find((result) => result?.notice)?.notice || "Route traffic: unavailable near this route right now";
+    routeTrafficText.textContent = fallbackNotice.replace(/^Traffic source:/, "Route traffic:");
     return;
   }
 
@@ -3732,7 +3942,7 @@ async function loadRouteTrafficSummary(nodeIds) {
 
   const failedSamples = results.length - validSamples.length;
   const failureSuffix = failedSamples ? `, ${failedSamples} sample(s) failed` : "";
-  routeTrafficText.textContent = `Route traffic: ${describeTrafficRatio(averageRatio)} from ${validSamples.length} live road samples${failureSuffix}`;
+  routeTrafficText.textContent = `Route traffic: ${describeTrafficRatio(averageRatio)} from ${validSamples.length} live road samples${failureSuffix}. Source: TomTom live traffic.`;
 }
 
 function sampleRouteNodeIds(nodeIds, maxSamples) {
@@ -3759,133 +3969,78 @@ async function fetchTrafficForNode(node, nearbyCandidateLimit = 0) {
     return null;
   }
 
-  const candidates = getTrafficCandidateNodes(node, nearbyCandidateLimit);
-  let lastError = null;
-
-  for (const candidate of candidates) {
-    for (const zoom of TOMTOM_FLOW_ZOOMS) {
-      try {
-        const traffic = await fetchTrafficSegmentAtZoom(candidate, zoom);
-        return {
-          traffic,
-          matchedNode: candidate,
-          zoom
-        };
-      } catch (error) {
-        lastError = error;
-        if (isTrafficPointMissError(error)) {
-          break;
-        }
-        if (!isRetryableTrafficError(error)) {
-          throw error;
-        }
-      }
-    }
-  }
-
-  if (isTrafficCoverageUnavailableError(lastError)) {
-    return null;
-  }
-
-  throw lastError || new Error("no traffic segment returned for this point");
-}
-
-function getTrafficCandidateNodes(originNode, nearbyCandidateLimit) {
-  const candidates = [originNode];
-  if (!nearbyCandidateLimit) {
-    return candidates;
-  }
-
-  const nearbyNodes = [];
-  for (const candidate of state.nodeIndex.values()) {
-    if (candidate.id === originNode.id) {
-      continue;
-    }
-
-    const distance = haversineDistance(originNode, candidate);
-    if (distance <= TRAFFIC_NEARBY_RADIUS_METERS) {
-      nearbyNodes.push({ node: candidate, distance });
-    }
-  }
-
-  nearbyNodes.sort((left, right) => left.distance - right.distance);
-  for (const nearby of nearbyNodes.slice(0, nearbyCandidateLimit)) {
-    candidates.push(nearby.node);
-  }
-
-  return candidates;
-}
-
-async function fetchTrafficSegmentAtZoom(node, zoom) {
-  const cacheKey = `${node.id}:${zoom}`;
+  const cacheKey = `${node.id}:${nearbyCandidateLimit}`;
   if (state.trafficCache.has(cacheKey)) {
     return state.trafficCache.get(cacheKey);
   }
 
-  const params = new URLSearchParams({
-    key: TOMTOM_API_KEY,
-    point: `${node.lat},${node.lng}`,
-    unit: "kmph",
-    thickness: "10"
-  });
-
-  const url = TOMTOM_FLOW_URL_TEMPLATE
-    .replace("{style}", TOMTOM_FLOW_STYLE)
-    .replace("{zoom}", String(zoom));
-
-  const request = fetch(`${url}?${params.toString()}`)
-    .then(async (response) => {
-      if (!response.ok) {
-        throw await buildTrafficError(response);
-      }
-
-      const payload = await response.json();
-      if (!payload.flowSegmentData) {
-        throw new Error("no traffic segment returned for this point");
-      }
-
-      return payload.flowSegmentData;
-    });
+  const request = fetchTrafficSamplesFromBackend([
+    {
+      nodeId: node.id,
+      lat: node.lat,
+      lng: node.lng,
+      nearbyCandidateLimit
+    }
+  ]).then((results) => results[0] || null);
 
   state.trafficCache.set(cacheKey, request);
   return request;
 }
 
-async function buildTrafficError(response) {
-  let details = "";
+async function fetchTrafficSamplesFromBackend(samples) {
+  if (!samples.length) {
+    return [];
+  }
 
+  if (!state.usingPythonBackend || !state.backendSupportsTrafficProxy) {
+    return samples.map(() => ({
+      traffic: null,
+      source: "heuristic_fallback",
+      notice: "Traffic source: heuristic fallback because live traffic was unavailable."
+    }));
+  }
+
+  let response;
   try {
-    const payload = await response.json();
-    details = payload.detailedError?.message || payload.error || "";
+    response = await fetch("/api/traffic-samples", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      },
+      body: JSON.stringify({ samples })
+    });
   } catch (error) {
-    details = "";
+    state.backendSupportsTrafficProxy = false;
+    return samples.map(() => ({
+      traffic: null,
+      source: "heuristic_fallback",
+      notice: "Traffic source: heuristic fallback because live traffic was unavailable."
+    }));
   }
 
-  if (response.status === 401) {
-    return new Error("TomTom API key is invalid, expired, or not authorized for Traffic API");
+  if (response.status === 404) {
+    state.backendSupportsTrafficProxy = false;
+    return samples.map(() => ({
+      traffic: null,
+      source: "heuristic_fallback",
+      notice: "Traffic source: heuristic fallback because live traffic was unavailable."
+    }));
   }
 
-  if (response.status === 403) {
-    return new Error("API key rejected or not enabled for Traffic API");
+  if (!response.ok) {
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch (error) {
+      payload = null;
+    }
+    throw new Error(payload?.error || `traffic request failed with ${response.status}`);
   }
 
-  if (details.includes("missing valid authentication credentials")) {
-    return new Error("TomTom API key is invalid, expired, or not authorized for Traffic API");
-  }
-
-  if (response.status === 429) {
-    return new Error("traffic API rate limit reached");
-  }
-
-  if (response.status === 400 && details) {
-    return new Error(details);
-  }
-
-  if (response.status === 503) {
-    return new Error("traffic service temporarily unavailable");
-  }
-
-  return new Error(details || `traffic request failed with ${response.status}`);
+  const payload = await response.json();
+  state.backendSupportsTrafficProxy = true;
+  return Array.isArray(payload?.samples) ? payload.samples : [];
 }
 
 function formatTrafficSummary(traffic) {
@@ -3894,18 +4049,26 @@ function formatTrafficSummary(traffic) {
   }
 
   const ratio = traffic.currentSpeed / Math.max(traffic.freeFlowSpeed, 1);
-  const closureText = traffic.roadClosure ? ", road closed" : "";
-  return `Traffic: ${traffic.currentSpeed}/${traffic.freeFlowSpeed} km/h, ${describeTrafficRatio(ratio)}, confidence ${Math.round((traffic.confidence || 0) * 100)}%${closureText}`;
+  if (traffic.roadClosure) {
+    return `Traffic: road closed, reported ${traffic.currentSpeed}/${traffic.freeFlowSpeed} km/h, confidence ${Math.round((traffic.confidence || 0) * 100)}%`;
+  }
+  return `Traffic: ${traffic.currentSpeed}/${traffic.freeFlowSpeed} km/h, ${describeTrafficRatio(ratio)}, confidence ${Math.round((traffic.confidence || 0) * 100)}%`;
 }
 
 function formatTrafficLookupResult(result, originNode) {
   const summary = formatTrafficSummary(result.traffic);
-  if (!result.matchedNode || result.matchedNode.id === originNode.id) {
-    return summary;
+  const matchedTarget = result.matchedNode || result.matchedPoint || null;
+  const sourceSuffix = result?.source === "tomtom_live"
+    ? " Source: TomTom live traffic."
+    : result?.notice
+      ? ` ${result.notice}`
+      : "";
+  if (!matchedTarget || result.matchedNode?.id === originNode.id) {
+    return `${summary}.${sourceSuffix}`.replace(/\.\s+\./g, ". ");
   }
 
-  const fallbackDistance = haversineDistance(originNode, result.matchedNode);
-  return `${summary}, nearby segment ${Math.round(fallbackDistance)} m away`;
+  const fallbackDistance = haversineDistance(originNode, matchedTarget);
+  return `${summary}, nearby segment ${Math.round(fallbackDistance)} m away.${sourceSuffix}`.replace(/\.\s+\./g, ". ");
 }
 
 function isRetryableTrafficError(error) {
@@ -3943,6 +4106,13 @@ function describeTrafficRatio(ratio) {
   }
 
   return "heavy";
+}
+
+function describeTrafficSource(source) {
+  if (source === "tomtom_live") {
+    return "TomTom live traffic";
+  }
+  return "heuristic fallback because live traffic was unavailable";
 }
 
 function describeWeatherCode(code, isDay = 1) {
