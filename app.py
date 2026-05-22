@@ -28,7 +28,7 @@ TOMTOM_FLOW_STYLE = "relative"
 TOMTOM_FLOW_ZOOMS = [17, 15, 13]
 TOMTOM_FLOW_URL_TEMPLATE = "https://api.tomtom.com/traffic/services/4/flowSegmentData/{style}/{zoom}/json"
 # Demo fallback only. Prefer TOMTOM_API_KEY from the environment when available.
-DEFAULT_TOMTOM_API_KEY = "pShs0RI2SZVYisktzJOUCTZBGKkHmCEC"
+DEFAULT_TOMTOM_API_KEY = "JwU0poCWdD2wx6Pq63HE8Qrz7izN663J"
 INITIAL_CENTER = (14.8386, 120.2842)
 STREET_EXCLUDE_REGEX = "footway|path|steps|cycleway|bridleway|corridor|construction|proposed"
 LANDMARK_QUERY_REGEX = "school|college|university|kindergarten|marketplace|townhall|courthouse|community_centre|post_office|police|fire_station|bus_station|hospital"
@@ -893,7 +893,7 @@ def describe_weather_code(code: int, is_day: int = 1) -> str:
     weather_codes = {
         0: "Sunny" if is_day else "Clear night",
         1: "Mostly sunny" if is_day else "Mostly clear night",
-        2: "Partly cloudy",
+        2: "Partly cloudy", 
         3: "Cloudy",
         45: "Fog",
         48: "Rime fog",
@@ -968,14 +968,15 @@ SERVICE = OlongapoRouteService()
 
 
 class HeatmapDataLoader:
-    """Loads ride_hailing_dataset.csv and pre-aggregates pickup density by grid cell and hour."""
+    """Loads the admin heatmap CSV and pre-aggregates pickup density by grid cell and hour."""
 
-    GRID_SIZE_DEGREES = 0.002
+    GRID_SIZE_DEGREES = 0.00035
     REQUIRED_COLUMNS = {"pickup_latitude", "pickup_longitude", "pickup_time"}
 
     def __init__(self, csv_path: Path):
         self.csv_path = csv_path
-        self.hourly_data: dict[int, list[dict]] = {}  # hour -> [{lat, lng, count}]
+        self.hourly_aggregated_data: dict[int, list[dict]] = {}  # hour -> [{lat, lng, count}]
+        self.hourly_raw_data: dict[int, list[dict]] = {}  # hour -> [{lat, lng, count, ...}]
         self.load_error: str | None = None
         self._load_and_aggregate()
 
@@ -1007,6 +1008,7 @@ class HeatmapDataLoader:
 
                 # hourly_grid: hour -> {(grid_lat, grid_lng): count}
                 hourly_grid: dict[int, dict[tuple[float, float], int]] = {}
+                hourly_raw: dict[int, list[dict[str, Any]]] = {}
 
                 for row_num, row in enumerate(reader, start=2):
                     # Validate required fields are present and non-empty
@@ -1037,16 +1039,34 @@ class HeatmapDataLoader:
                         print(f"Warning: Skipping row {row_num}: invalid pickup_time format", file=sys.stderr)
                         continue
 
+                    if hour not in hourly_raw:
+                        hourly_raw[hour] = []
+                    hourly_raw[hour].append(
+                        {
+                            "lat": round(lat, 6),
+                            "lng": round(lng, 6),
+                            "count": 1,
+                            "pickupTime": pickup_time_str,
+                            "pickupDay": row.get("pickup_day", "").strip(),
+                            "pickupDate": row.get("pickup_date", "").strip(),
+                            "weatherCondition": row.get("weather_condition", "").strip(),
+                            "establishmentName": row.get("establishment_name", "").strip(),
+                            "section": row.get("section", "").strip(),
+                        }
+                    )
+
                     # Snap to grid and aggregate
                     grid_cell = self._snap_to_grid(lat, lng)
                     if hour not in hourly_grid:
                         hourly_grid[hour] = {}
                     hourly_grid[hour][grid_cell] = hourly_grid[hour].get(grid_cell, 0) + 1
 
-                # Convert aggregated grid data to list format
+                # Convert hourly data to list format
                 for hour in range(24):
+                    self.hourly_raw_data[hour] = hourly_raw.get(hour, [])
+
                     cells = hourly_grid.get(hour, {})
-                    self.hourly_data[hour] = [
+                    self.hourly_aggregated_data[hour] = [
                         {"lat": cell[0], "lng": cell[1], "count": count}
                         for cell, count in cells.items()
                     ]
@@ -1054,24 +1074,31 @@ class HeatmapDataLoader:
         except Exception as e:  # noqa: BLE001
             self.load_error = f"Error loading dataset: {e}"
 
-    def get_heatmap_data(self, hour: int) -> dict:
-        """Return aggregated data for a specific hour (0-23)."""
+    def get_heatmap_data(self, hour: int, mode: str = "aggregated") -> dict:
+        """Return aggregated or raw heatmap data for a specific hour (0-23)."""
         if self.load_error:
             return {"error": self.load_error}
 
         if not isinstance(hour, int) or hour < 0 or hour > 23:
             return {"error": "Invalid hour parameter. Must be an integer between 0 and 23."}
 
-        points = self.hourly_data.get(hour, [])
+        normalized_mode = "raw" if mode == "raw" else "aggregated"
+        points = (
+            self.hourly_raw_data.get(hour, [])
+            if normalized_mode == "raw"
+            else self.hourly_aggregated_data.get(hour, [])
+        )
         total_bookings = sum(p["count"] for p in points)
         return {
             "hour": hour,
             "points": points,
             "totalBookings": total_bookings,
+            "datasetName": self.csv_path.name,
+            "renderMode": normalized_mode,
         }
 
 
-heatmap_loader = HeatmapDataLoader(STATIC_ROOT / "ride_hailing_dataset.csv")
+heatmap_loader = HeatmapDataLoader(STATIC_ROOT / "admin_heatmap_dataset.csv")
 
 
 class AppHandler(BaseHTTPRequestHandler):
@@ -1173,6 +1200,7 @@ class AppHandler(BaseHTTPRequestHandler):
     def handle_heatmap_data(self, query_string: str) -> None:
         params = parse_qs(query_string)
         hour_values = params.get("hour", [])
+        mode_values = params.get("mode", [])
 
         if not hour_values:
             self.respond_json(
@@ -1219,7 +1247,8 @@ class AppHandler(BaseHTTPRequestHandler):
             )
             return
 
-        data = heatmap_loader.get_heatmap_data(hour)
+        mode = mode_values[0].strip().lower() if mode_values else "aggregated"
+        data = heatmap_loader.get_heatmap_data(hour, mode)
         self.respond_json(data)
 
     def handle_nearest_road_point(self, body: dict[str, Any]) -> None:
@@ -1355,6 +1384,11 @@ def main() -> None:
 
     server = ThreadingHTTPServer((args.host, args.port), AppHandler)
     print(f"Serving Olongapo Route Finder on http://{args.host}:{args.port}")
+    print(f"Heatmap dataset path: {heatmap_loader.csv_path}")
+    if heatmap_loader.load_error:
+        print(f"Heatmap dataset error: {heatmap_loader.load_error}")
+    else:
+        print("Heatmap dataset loaded successfully.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -55,7 +55,6 @@
 
       <div class="admin-nav" aria-label="Admin view controls">
         <button id="heatmap-nav-btn" class="ghost-btn" type="button">Booking Heatmap</button>
-        <button id="admin-pricing-details-btn" class="ghost-btn" type="button">Pricing Details</button>
       </div>
 
       <div class="control-group" data-mobile-section="request">
@@ -132,18 +131,9 @@
             <span class="offer-summary__label">Pickup ETA</span>
             <strong id="offer-eta-text">--</strong>
           </div>
-          <div class="offer-summary__item">
-            <span class="offer-summary__label">Baseline driver</span>
-            <strong id="offer-baseline-text">--</strong>
-          </div>
-          <div class="offer-summary__item">
-            <span class="offer-summary__label">Baseline distance</span>
-            <strong id="offer-baseline-distance-text">--</strong>
-          </div>
         </div>
         <div class="offer-reason-block">
-          <span class="offer-reason-block__label">Why this match</span>
-          <ul id="offer-reason-list" class="offer-reason-list"></ul>
+          <div id="offer-reason-list" class="offer-reason-list"></div>
         </div>
         <div class="button-row button-row--offer">
           <button id="accept-driver-btn" class="action-btn" type="button">Accept Driver</button>
@@ -152,24 +142,15 @@
         </div>
       </div>
 
-      <div id="pricing-details-panel" class="control-group pricing-details-panel" data-admin-only hidden>
-        <p class="control-group__label">Pricing Details</p>
-        <strong id="pricing-details-title">Fare calculation</strong>
-        <small id="pricing-details-text" class="detail-text">No fare has been calculated yet.</small>
-      </div>
-
       <div class="stats">
         <div class="stat-card" data-mobile-tab="trip">
           <span class="stat-card__label">Status</span>
           <strong id="status-text">Loading boundary and street network...</strong>
         </div>
         <div class="stat-card" data-mobile-tab="trip">
-          <span class="stat-card__label">Olongapo Time</span>
-          <strong id="time-text">Loading local time...</strong>
-        </div>
-        <div class="stat-card" data-mobile-tab="trip">
-          <span class="stat-card__label">Current Weather</span>
-          <strong id="weather-text">Loading weather...</strong>
+          <span class="stat-card__label">Ride Progress</span>
+          <strong id="route-text">Waiting for pickup and drop-off</strong>
+          <small id="route-traffic-text" class="detail-text">Route traffic: unavailable until a driver is accepted</small>
         </div>
         <div class="stat-card" data-mobile-tab="trip">
           <span class="stat-card__label">Pickup</span>
@@ -185,16 +166,6 @@
           <span class="stat-card__label">Driver</span>
           <strong id="point-b-text">Waiting for driver suggestion</strong>
           <small id="traffic-b-text" class="detail-text">Driver profile appears after pickup and drop-off are set</small>
-        </div>
-        <div class="stat-card" data-mobile-tab="trip">
-          <span class="stat-card__label">Ride Progress</span>
-          <strong id="route-text">Waiting for pickup and drop-off</strong>
-          <small id="route-traffic-text" class="detail-text">Route traffic: unavailable until a driver is accepted</small>
-        </div>
-        <div class="stat-card" data-mobile-tab="trip">
-          <span class="stat-card__label">Driver Simulation</span>
-          <strong id="driver-summary-text">Preparing 100 drivers...</strong>
-          <small id="driver-breakdown-text" class="detail-text">60 cars, 40 motorcycles. Green = available, orange = going to passenger, red = on-trip, yellow = suggested or matched to you.</small>
         </div>
         <div class="stat-card" data-mobile-tab="fare">
           <span class="stat-card__label">Total Fare</span>

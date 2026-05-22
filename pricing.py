@@ -30,6 +30,19 @@ class PricingConfig:
     minimum_car_fare: float = 85.0
 
 
+@dataclass
+class WeatherPricingAdjustment:
+    label: str
+    summary: str
+    source: str
+    category: str
+    weather_code: int | None
+    precipitation_mm: float
+    wind_speed_kph: float
+    surcharge_rate: float
+    note: str
+
+
 class FuelPriceProvider:
     def __init__(self) -> None:
         self._cache: dict[str, Any] | None = None
@@ -128,6 +141,7 @@ def calculate_fare(
     trip_distance_meters: float,
     fuel_price_per_liter: float,
     hour_of_day: int | None = None,
+    weather_payload: dict[str, Any] | None = None,
     config: PricingConfig | None = None,
 ) -> dict[str, Any]:
     config = config or PricingConfig()
@@ -165,7 +179,10 @@ def calculate_fare(
     
     fuel_component = fuel_cost * config.fuel_markup_multiplier
     subtotal = base_fare + distance_fee + fuel_component + config.service_fee
-    total = max(minimum_fare, subtotal)
+    subtotal_before_weather = max(minimum_fare, subtotal)
+    weather_adjustment = build_weather_pricing_adjustment(weather_payload)
+    weather_surcharge = subtotal_before_weather * weather_adjustment.surcharge_rate
+    total = subtotal_before_weather + weather_surcharge
 
     return {
         "isNightSurge": is_night_surge,
@@ -183,9 +200,119 @@ def calculate_fare(
         "distanceFee": round(distance_fee, 2),
         "serviceFee": round(config.service_fee, 2),
         "minimumFare": round(minimum_fare, 2),
+        "subtotalBeforeWeather": round(subtotal_before_weather, 2),
+        "weatherSurcharge": round(weather_surcharge, 2),
+        "weatherSurchargeRate": round(weather_adjustment.surcharge_rate, 4),
+        "weatherAdjustment": asdict(weather_adjustment),
         "totalFare": round(total, 2),
         "config": asdict(config),
     }
+
+
+def build_weather_pricing_adjustment(weather_payload: dict[str, Any] | None) -> WeatherPricingAdjustment:
+    if not isinstance(weather_payload, dict):
+        return WeatherPricingAdjustment(
+            label="Weather unavailable",
+            summary="Weather unavailable right now.",
+            source="weather_fallback",
+            category="unknown",
+            weather_code=None,
+            precipitation_mm=0.0,
+            wind_speed_kph=0.0,
+            surcharge_rate=0.0,
+            note="No live weather surcharge was applied.",
+        )
+
+    raw = weather_payload.get("raw") if isinstance(weather_payload.get("raw"), dict) else {}
+    summary = str(weather_payload.get("summary") or "Weather unavailable right now.")
+    source = str(weather_payload.get("source") or "weather_fallback")
+    weather_code = parse_weather_code(raw.get("weather_code"))
+    precipitation_mm = parse_weather_float(raw.get("precipitation"))
+    wind_speed_kph = parse_weather_float(raw.get("wind_speed_10m"))
+
+    base_rate, category, label = classify_weather_surcharge(weather_code)
+    surcharge_rate = base_rate + get_precipitation_surcharge_bump(precipitation_mm) + get_wind_surcharge_bump(wind_speed_kph)
+    surcharge_rate = clamp_value(surcharge_rate, 0.0, 0.28)
+
+    if source != "open_meteo_live" or not raw:
+        surcharge_rate = 0.0
+        note = "Live Open-Meteo weather was unavailable, so no weather surcharge was applied."
+    elif surcharge_rate <= 0:
+        note = "Current Olongapo weather is fair, so no weather surcharge was applied."
+    else:
+        note = f"Live Olongapo weather added a {round(surcharge_rate * 100)}% surcharge."
+
+    return WeatherPricingAdjustment(
+        label=label,
+        summary=summary,
+        source=source,
+        category=category,
+        weather_code=weather_code,
+        precipitation_mm=round(precipitation_mm, 2),
+        wind_speed_kph=round(wind_speed_kph, 2),
+        surcharge_rate=round(surcharge_rate, 4),
+        note=note,
+    )
+
+
+def classify_weather_surcharge(weather_code: int | None) -> tuple[float, str, str]:
+    if weather_code in {0, 1}:
+        return (0.0, "fair", "Sunny")
+    if weather_code == 2:
+        return (0.0, "fair", "Partly cloudy")
+    if weather_code == 3:
+        return (0.02, "cloudy", "Cloudy")
+    if weather_code in {45, 48, 51, 53, 55}:
+        return (0.05, "drizzle_or_fog", "Drizzle or fog")
+    if weather_code in {61, 80}:
+        return (0.08, "light_rain", "Light rain")
+    if weather_code in {63, 81}:
+        return (0.12, "rain", "Rain")
+    if weather_code in {65, 82}:
+        return (0.18, "heavy_rain", "Heavy rain")
+    if weather_code in {95, 96, 99}:
+        return (0.24, "thunderstorm", "Thunderstorm")
+    return (0.03, "unclassified", "Unsettled weather")
+
+
+def get_precipitation_surcharge_bump(precipitation_mm: float) -> float:
+    if precipitation_mm >= 10:
+        return 0.04
+    if precipitation_mm >= 5:
+        return 0.03
+    if precipitation_mm >= 2:
+        return 0.02
+    if precipitation_mm > 0:
+        return 0.01
+    return 0.0
+
+
+def get_wind_surcharge_bump(wind_speed_kph: float) -> float:
+    if wind_speed_kph >= 35:
+        return 0.03
+    if wind_speed_kph >= 25:
+        return 0.02
+    if wind_speed_kph >= 15:
+        return 0.01
+    return 0.0
+
+
+def parse_weather_code(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_weather_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def clamp_value(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
 
 
 FUEL_PRICE_PROVIDER = FuelPriceProvider()

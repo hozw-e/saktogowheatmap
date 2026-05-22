@@ -188,6 +188,7 @@ const state = {
   suggestionCursor: 0,
   suggestionSearchRadiusMeters: MATCH_DEFAULT_RADIUS_METERS,
   baselineNearestSuggestion: null,
+  baselineDriverMarker: null,
   ridePhase: "idle",
   offeredDriverId: null,
   selectedDriverId: null,
@@ -199,6 +200,7 @@ const state = {
   weatherContext: {
     label: "Weather unavailable right now.",
     multiplier: 1,
+    raw: null,
     source: "weather_fallback",
     notice: "Weather source: fallback because live weather was unavailable."
   },
@@ -212,6 +214,13 @@ const state = {
   heatmapLayer: null,
   heatmapHour: getCurrentManilaHour(),
   heatmapCache: {},
+  heatmapCurrentPoints: [],
+  heatmapHoverOverlay: null,
+  heatmapMeta: {
+    datasetName: "",
+    totalBookings: 0,
+    renderMode: "aggregated",
+  },
   heatmapSliderControl: null,
   heatmapLegendControl: null,
   lastPricingEstimate: null
@@ -244,6 +253,11 @@ map.on("click", (event) => {
 });
 map.on("locationfound", handleManualLocationFound);
 map.on("locationerror", handleManualLocationError);
+map.on("zoomend", () => {
+  if (state.heatmapView) {
+    refreshHeatmapForCurrentView();
+  }
+});
 
 initialize().catch((error) => {
   console.error(error);
@@ -316,7 +330,9 @@ function setEntryMode(mode) {
     hideLoadingOverlay();
   }
 
+  syncLocateControlVisibility();
   updateMapPrivacyLayers();
+  syncSharedDriverStateAcrossViews();
 
   window.setTimeout(() => {
     map.invalidateSize();
@@ -343,6 +359,33 @@ function setEntryMode(mode) {
     ? "User mode selected. Phone-style layout is now active."
     : "Admin mode selected. Full web layout is now active.");
   updateRequestUI();
+}
+
+function syncSharedDriverStateAcrossViews() {
+  if (state.pendingDriverOffer?.driver) {
+    const liveDriver = state.drivers.find((driver) => driver.id === state.pendingDriverOffer.driver.id);
+    if (liveDriver) {
+      state.pendingDriverOffer.driver = liveDriver;
+      syncPendingDriverOfferToHeldDriver(state.pendingDriverOffer);
+
+      if (state.pendingDriverOffer.startNode && state.pendingDriverOffer.pickupPath && state.pendingDriverOffer.tripPath) {
+        drawSuggestedDriverPreview(
+          liveDriver,
+          state.pendingDriverOffer.startNode,
+          state.pendingDriverOffer.pickupPath,
+          state.pendingDriverOffer.tripPath
+        );
+      }
+    }
+  } else if (state.selectedDriverId && (state.ridePhase === "driver_to_pickup" || state.ridePhase === "on_trip")) {
+    syncMatchedDriverRoute();
+  }
+
+  for (const driver of state.drivers) {
+    updateDriverMarker(driver);
+  }
+
+  updateMapLegend();
 }
 
 function setUserPanelTab(tab) {
@@ -405,8 +448,8 @@ locateMapControl.onAdd = () => {
 };
 
 mapLegendControl.addTo(map);
-locateMapControl.addTo(map);
 applyInitialViewMode();
+syncLocateControlVisibility();
 updateRequestUI();
 
 function renderMapLegend(container) {
@@ -460,22 +503,6 @@ function renderMapLegend(container) {
       <span class="map-legend__dot map-legend__dot--ontrip"></span>
       <span>On-trip drivers (${counts.assignedOnTripDrivers.toLocaleString()})</span>
     </div>
-    <div class="map-legend__item">
-      <span class="map-legend__dot map-legend__dot--matched"></span>
-      <span>${matchedLabel} (${counts.matchedDriver})</span>
-    </div>
-    <div class="map-legend__item">
-      <span class="map-legend__dot map-legend__dot--user"></span>
-      <span>My location</span>
-    </div>
-    <div class="map-legend__item">
-      <span class="map-legend__dot map-legend__dot--pickup-point"></span>
-      <span>Pickup</span>
-    </div>
-    <div class="map-legend__item">
-      <span class="map-legend__dot map-legend__dot--dropoff-point"></span>
-      <span>Drop-off</span>
-    </div>
   `;
 }
 
@@ -488,8 +515,27 @@ function updateMapPrivacyLayers() {
     landmarkLayer.addTo(map);
   }
 
+   if (state.viewMode === "user") {
+    updateBrowserLocationMarker();
+  } else {
+    clearBrowserLocationMarker();
+  }
+
   for (const driver of state.drivers) {
     updateDriverMarker(driver);
+  }
+}
+
+function syncLocateControlVisibility() {
+  if (state.viewMode === "user") {
+    if (!locateMapControl._map) {
+      locateMapControl.addTo(map);
+    }
+    return;
+  }
+
+  if (locateMapControl._map) {
+    locateMapControl.remove();
   }
 }
 
@@ -562,6 +608,8 @@ function clearDriverSuggestionRanking() {
   state.suggestionCursor = 0;
   state.baselineNearestSuggestion = null;
   state.suggestionSearchRadiusMeters = MATCH_DEFAULT_RADIUS_METERS;
+  removeBaselineDriverMarker();
+  updateMapLegend();
 }
 
 function updateRequestUILegacy() {
@@ -634,6 +682,7 @@ function updateRequestUILegacy() {
 function updateOfferCard(title, detail) {
   offerTitleText.textContent = title;
   offerDetailText.textContent = detail;
+  offerDetailText.hidden = !detail;
   clearOfferMatchSummary();
   updateRequestUI();
 }
@@ -645,6 +694,7 @@ function clearOfferMatchSummary() {
   if (offerBaselineText) offerBaselineText.textContent = "--";
   if (offerBaselineDistanceText) offerBaselineDistanceText.textContent = "--";
   if (matcherSourceRow) {
+    matcherSourceRow.hidden = true;
     matcherSourceRow.replaceChildren();
   }
   if (offerReasonList) {
@@ -677,37 +727,15 @@ function renderOfferMatchSummary(offer) {
     return;
   }
 
-  const reasonItems = buildOfferReasonItems(offer);
-  const nodes = reasonItems.map((item) => {
-    const li = document.createElement("li");
-    li.textContent = item;
-    return li;
-  });
-  offerReasonList.replaceChildren(...nodes);
+  offerReasonList.replaceChildren(buildOfferReasonTable(offer));
 }
 
 function renderMatcherSourceBadges(offer) {
   if (!matcherSourceRow) {
     return;
   }
-
-  const badges = [];
-  const modeLabel = offer.matchingMode === "browser_fallback"
-    ? "Matcher: Browser fallback"
-    : "Matcher: Backend primary";
-  badges.push(createMatcherSourceBadge(modeLabel, "matcher-source-badge matcher-source-badge--mode"));
-
-  if (offer.trafficSource) {
-    const trafficLabel = offer.trafficSource === "tomtom_live"
-      ? "Traffic: TomTom live"
-      : "Traffic: Heuristic fallback";
-    const trafficClass = offer.trafficSource === "tomtom_live"
-      ? "matcher-source-badge matcher-source-badge--live"
-      : "matcher-source-badge matcher-source-badge--fallback";
-    badges.push(createMatcherSourceBadge(trafficLabel, trafficClass));
-  }
-
-  matcherSourceRow.replaceChildren(...badges);
+  matcherSourceRow.hidden = true;
+  matcherSourceRow.replaceChildren();
 }
 
 function createMatcherSourceBadge(label, className) {
@@ -717,74 +745,106 @@ function createMatcherSourceBadge(label, className) {
   return badge;
 }
 
-function buildOfferReasonItems(offer) {
-  const items = [];
+function buildOfferReasonTable(offer) {
+  const table = document.createElement("table");
+  table.className = "offer-score-table";
 
-  items.push("ETA is shown for clarity only and is not part of the score.");
+  const thead = document.createElement("thead");
+  thead.innerHTML = `
+    <tr>
+      <th scope="col">Factor</th>
+      <th scope="col">Score</th>
+      <th scope="col">Actual Value</th>
+    </tr>
+  `;
+  table.appendChild(thead);
 
-  if (offer.matchingMode === "browser_fallback") {
-    items.push("Matching mode: browser fallback mode.");
-  }
+  const tbody = document.createElement("tbody");
+  const rows = [
+    buildOfferMetricRow("Distance", offer.distanceScore, formatDistanceValue(offer.pickupDistanceMeters)),
+    buildOfferMetricRow("Traffic", offer.trafficScore, formatTrafficValue(offer)),
+    buildOfferMetricRow("Rating", offer.ratingScore, formatRatingValue(offer)),
+    buildOfferMetricRow("Cancellation Risk", offer.cancellationScore, formatCancellationValue(offer)),
+    buildOfferMetricRow("Route Efficiency", offer.routeEfficiencyScore, formatRouteEfficiencyValue(offer)),
+    buildOfferMetricRow("Movement", offer.movementScore, formatMovementValue(offer))
+  ];
 
-  if (state.baselineNearestSuggestion) {
-    const baseline = state.baselineNearestSuggestion;
-    items.push(`Baseline check: Driver ${baseline.driverId} at ${(baseline.directDistanceMeters / 1000).toFixed(2)} km straight-line.`);
-  }
+  tbody.replaceChildren(...rows);
+  table.appendChild(tbody);
+  return table;
+}
 
-  if (typeof offer.finalScore === "number") {
-    items.push(`Overall score: ${offer.finalScore.toFixed(2)}.`);
-  }
+function buildOfferMetricRow(label, score, actualValue) {
+  const row = document.createElement("tr");
 
-  if (typeof offer.trafficRatio === "number") {
-    items.push(`Traffic: ${describeTrafficRatio(offer.trafficRatio)}.`);
-  }
+  const factorCell = document.createElement("th");
+  factorCell.scope = "row";
+  factorCell.textContent = label;
 
-  if (offer.trafficNotice) {
-    items.push(offer.trafficNotice.endsWith(".") ? offer.trafficNotice : `${offer.trafficNotice}.`);
-  } else if (offer.trafficSource) {
-    items.push(`Traffic source: ${describeTrafficSource(offer.trafficSource)}.`);
-  }
+  const scoreCell = document.createElement("td");
+  scoreCell.textContent = formatScoreValue(score);
 
-  if (typeof offer.pickupDistanceMeters === "number") {
-    items.push(`Pickup route: ${(offer.pickupDistanceMeters / 1000).toFixed(2)} km.`);
-  }
-
-  if (offer.pricingEstimate) {
-    items.push(`Estimated fare: ${formatPeso(offer.pricingEstimate.totalFare)}.`);
-    items.push(`Fuel basis: ${formatDecimal(offer.pricingEstimate.litersUsed, 3)} L at ${formatPeso(offer.pricingEstimate.fuelPricePerLiter)}/L using ${formatDecimal(offer.pricingEstimate.kmPerLiter, 1)} km/L.`);
-  } else if (offer.pricingLoading) {
-    items.push("Fare estimate: calculating fuel-based price.");
-  }
-
-  if (typeof offer.routeEfficiencyScore === "number") {
-    items.push(`Route efficiency: ${Math.round(offer.routeEfficiencyScore * 100)}%.`);
-  }
-
-  if (offer.driver && typeof offer.driver.rating === "number") {
-    items.push(`Rating: ${offer.driver.rating.toFixed(2)}.`);
-  }
-
-  if (offer.driver && typeof offer.driver.cancellationRate === "number") {
-    items.push(`Cancellation risk: ${formatCancellationRisk(offer.driver.cancellationRate)}.`);
-  }
-
-  if (offer.driver && typeof offer.movementScore === "number") {
-    items.push(`Movement: ${describeMovementBehavior(offer.driver, offer.movementScore)}.`);
-  }
-
-  if (offer.selectionReason && items.length < 4) {
-    const fallbackItems = offer.selectionReason
-      .replace(/^ETA is shown for user understanding but not scored directly\.\s*/i, "")
-      .replace(/^Selected because it\s*/i, "")
-      .split(/,\s*/)
-      .map((item) => item.trim().replace(/\.$/, ""))
-      .filter(Boolean);
-    for (const item of fallbackItems) {
-      items.push(item.endsWith(".") ? item : `${item}.`);
+  const valueCell = document.createElement("td");
+  if (actualValue && typeof actualValue === "object") {
+    valueCell.textContent = actualValue.text || "--";
+    if (actualValue.className) {
+      valueCell.className = actualValue.className;
     }
+  } else {
+    valueCell.textContent = actualValue;
   }
 
-  return items;
+  row.append(factorCell, scoreCell, valueCell);
+  return row;
+}
+
+function formatScoreValue(value) {
+  return typeof value === "number" ? value.toFixed(2) : "--";
+}
+
+function formatDistanceValue(distanceMeters) {
+  return typeof distanceMeters === "number"
+    ? `${(distanceMeters / 1000).toFixed(2)} km pickup route`
+    : "--";
+}
+
+function formatTrafficValue(offer) {
+  if (typeof offer?.trafficRatio !== "number") {
+    return "--";
+  }
+
+  return {
+    text: `${describeTrafficRatio(offer.trafficRatio)} (${offer.trafficRatio.toFixed(2)})`,
+    className: offer.trafficSource === "tomtom_live"
+      ? "offer-score-table__traffic offer-score-table__traffic--live"
+      : "offer-score-table__traffic offer-score-table__traffic--fallback"
+  };
+}
+
+function formatRatingValue(offer) {
+  return offer?.driver && typeof offer.driver.rating === "number"
+    ? `${offer.driver.rating.toFixed(2)} stars`
+    : "--";
+}
+
+function formatCancellationValue(offer) {
+  if (!offer?.driver || typeof offer.driver.cancellationRate !== "number") {
+    return "--";
+  }
+
+  return `${formatCancellationRisk(offer.driver.cancellationRate)} (${Math.round(offer.driver.cancellationRate * 100)}%)`;
+}
+
+function formatRouteEfficiencyValue(offer) {
+  return typeof offer?.routeEfficiencyScore === "number"
+    ? `${Math.round(offer.routeEfficiencyScore * 100)}% efficient`
+    : "--";
+}
+
+function formatMovementValue(offer) {
+  return offer?.driver && typeof offer.movementScore === "number"
+    ? describeMovementBehavior(offer.driver, offer.movementScore)
+    : "--";
 }
 
 function formatPeso(value) {
@@ -875,7 +935,10 @@ function buildFallbackPricingEstimate(offer, request = buildPricingRequest(offer
   const fuelCost = billedLiters * DEFAULT_FUEL_PRICE_PER_LITER;
   const fuelComponent = fuelCost * config.fuelMarkupMultiplier;
   const distanceFee = billedRouteKm * ratePerKm;
-  const totalFare = Math.max(minimumFare, baseFare + distanceFee + fuelComponent + config.serviceFee);
+  const subtotalBeforeWeather = Math.max(minimumFare, baseFare + distanceFee + fuelComponent + config.serviceFee);
+  const weatherAdjustment = buildBrowserWeatherPricingAdjustment(state.weatherContext);
+  const weatherSurcharge = subtotalBeforeWeather * (weatherAdjustment.surchargeRate || 0);
+  const totalFare = subtotalBeforeWeather + weatherSurcharge;
 
   return {
     isNightSurge,
@@ -893,6 +956,10 @@ function buildFallbackPricingEstimate(offer, request = buildPricingRequest(offer
     distanceFee: roundTo(distanceFee, 2),
     serviceFee: roundTo(config.serviceFee, 2),
     minimumFare: roundTo(minimumFare, 2),
+    subtotalBeforeWeather: roundTo(subtotalBeforeWeather, 2),
+    weatherSurcharge: roundTo(weatherSurcharge, 2),
+    weatherSurchargeRate: roundTo(weatherAdjustment.surchargeRate || 0, 4),
+    weatherAdjustment,
     totalFare: roundTo(totalFare, 2),
     config,
     request,
@@ -903,8 +970,109 @@ function buildFallbackPricingEstimate(offer, request = buildPricingRequest(offer
       updatedAt: null,
       note: "Python pricing API unavailable; using browser fallback fuel price."
     },
-    sourceNote: "Browser fallback pricing is active because the Python pricing endpoint was unavailable."
+    sourceNote: "Browser fallback pricing is active because the Python pricing endpoint was unavailable. Weather surcharge still uses the current Open-Meteo weather state when available."
   };
+}
+
+function buildBrowserWeatherPricingAdjustment(weatherContext = state.weatherContext) {
+  const raw = weatherContext?.raw || null;
+  const source = weatherContext?.source || "weather_fallback";
+  const summary = weatherContext?.label || "Weather unavailable right now.";
+
+  if (!raw || source !== "open_meteo_live") {
+    return {
+      label: summary,
+      summary,
+      source,
+      category: "unknown",
+      weatherCode: null,
+      precipitationMm: 0,
+      windSpeedKph: 0,
+      surchargeRate: 0,
+      note: "Live weather was unavailable, so no weather surcharge was applied."
+    };
+  }
+
+  const weatherCode = Number.isFinite(Number(raw.weather_code)) ? Number(raw.weather_code) : null;
+  const precipitationMm = Number(raw.precipitation || 0);
+  const windSpeedKph = Number(raw.wind_speed_10m || 0);
+  const [baseRate, category, label] = classifyWeatherPricing(weatherCode);
+  const surchargeRate = clampValue(
+    baseRate + getPrecipitationSurchargeBump(precipitationMm) + getWindSurchargeBump(windSpeedKph),
+    0,
+    0.28
+  );
+
+  return {
+    label,
+    summary,
+    source,
+    category,
+    weatherCode,
+    precipitationMm: roundTo(precipitationMm, 2),
+    windSpeedKph: roundTo(windSpeedKph, 2),
+    surchargeRate: roundTo(surchargeRate, 4),
+    note: surchargeRate > 0
+      ? `Live Olongapo weather added a ${Math.round(surchargeRate * 100)}% surcharge.`
+      : "Current Olongapo weather is fair, so no weather surcharge was applied."
+  };
+}
+
+function classifyWeatherPricing(weatherCode) {
+  if (weatherCode === 0 || weatherCode === 1) {
+    return [0, "fair", "Sunny"];
+  }
+  if (weatherCode === 2) {
+    return [0, "fair", "Partly cloudy"];
+  }
+  if (weatherCode === 3) {
+    return [0.02, "cloudy", "Cloudy"];
+  }
+  if ([45, 48, 51, 53, 55].includes(weatherCode)) {
+    return [0.05, "drizzle_or_fog", "Drizzle or fog"];
+  }
+  if ([61, 80].includes(weatherCode)) {
+    return [0.08, "light_rain", "Light rain"];
+  }
+  if ([63, 81].includes(weatherCode)) {
+    return [0.12, "rain", "Rain"];
+  }
+  if ([65, 82].includes(weatherCode)) {
+    return [0.18, "heavy_rain", "Heavy rain"];
+  }
+  if ([95, 96, 99].includes(weatherCode)) {
+    return [0.24, "thunderstorm", "Thunderstorm"];
+  }
+  return [0.03, "unclassified", "Unsettled weather"];
+}
+
+function getPrecipitationSurchargeBump(precipitationMm) {
+  if (precipitationMm >= 10) {
+    return 0.04;
+  }
+  if (precipitationMm >= 5) {
+    return 0.03;
+  }
+  if (precipitationMm >= 2) {
+    return 0.02;
+  }
+  if (precipitationMm > 0) {
+    return 0.01;
+  }
+  return 0;
+}
+
+function getWindSurchargeBump(windSpeedKph) {
+  if (windSpeedKph >= 35) {
+    return 0.03;
+  }
+  if (windSpeedKph >= 25) {
+    return 0.02;
+  }
+  if (windSpeedKph >= 15) {
+    return 0.01;
+  }
+  return 0;
 }
 
 async function refreshOfferPricing(offer) {
@@ -1003,8 +1171,10 @@ function updatePricingDetailsPanel(estimate, options = {}) {
   const fuelSource = getPricingSourceLabel(estimate);
   const sourceNote = estimate.sourceNote || estimate.fuelPrice?.note || "";
   const nightSurgeTag = estimate.isNightSurge ? " [NIGHT SURGE APPLIED 1.5x]" : "";
+  const weatherLabel = estimate.weatherAdjustment?.label || "Weather unavailable";
+  const weatherRatePercent = formatDecimal((estimate.weatherSurchargeRate || 0) * 100, 1);
   pricingDetailsTitle.textContent = `${vehicleLabel} fare: ${formatPeso(estimate.totalFare)}${nightSurgeTag}`;
-  pricingDetailsText.textContent = `Route ${formatDecimal(estimate.routeKm, 2)} km: pickup ${formatDecimal(estimate.pickupKm, 2)} km (billed at ${estimate.config?.pickupMultiplier || estimate.config?.pickup_multiplier || 0.5}x) plus trip ${formatDecimal(estimate.tripKm, 2)} km. Fuel ${formatDecimal(estimate.litersUsed, 3)} L at ${formatPeso(estimate.fuelPricePerLiter)}/L using ${formatDecimal(estimate.kmPerLiter, 1)} km/L. Fare parts: base ${formatPeso(estimate.baseFare)}, distance ${formatPeso(estimate.distanceFee)}, fuel ${formatPeso(estimate.fuelComponent)}, service ${formatPeso(estimate.serviceFee)}, minimum ${formatPeso(estimate.minimumFare)}. Source: ${fuelSource}${sourceNote ? `. ${sourceNote}` : ""}`;
+  pricingDetailsText.textContent = `Route ${formatDecimal(estimate.routeKm, 2)} km: pickup ${formatDecimal(estimate.pickupKm, 2)} km (billed at ${estimate.config?.pickupMultiplier || estimate.config?.pickup_multiplier || 0.5}x) plus trip ${formatDecimal(estimate.tripKm, 2)} km. Fuel ${formatDecimal(estimate.litersUsed, 3)} L at ${formatPeso(estimate.fuelPricePerLiter)}/L using ${formatDecimal(estimate.kmPerLiter, 1)} km/L. Fare parts: base ${formatPeso(estimate.baseFare)}, distance ${formatPeso(estimate.distanceFee)}, fuel ${formatPeso(estimate.fuelComponent)}, weather ${formatPeso(estimate.weatherSurcharge || 0)}, service ${formatPeso(estimate.serviceFee)}, minimum ${formatPeso(estimate.minimumFare)}. Weather: ${weatherLabel} at ${weatherRatePercent}% surcharge. ${estimate.weatherAdjustment?.note || "No weather surcharge note available."} Source: ${fuelSource}${sourceNote ? `. ${sourceNote}` : ""}`;
 }
 
 function getPricingSourceLabel(estimate) {
@@ -1162,8 +1332,8 @@ function updateFareTab(estimate, isLoading) {
   const nightSurgeTag = estimate.isNightSurge ? " \u2014 Night Surge 1.5x Applied" : "";
   if (fareTotalText) fareTotalText.textContent = formatPeso(estimate.totalFare);
   if (fareVehicleText) fareVehicleText.textContent = `${vehicleLabel} ride \u2014 minimum fare ${formatPeso(estimate.minimumFare)}${nightSurgeTag}`;
-  if (fareBreakdownText) fareBreakdownText.textContent = `Base ${formatPeso(estimate.baseFare)} + Distance ${formatPeso(estimate.distanceFee)} + Fuel ${formatPeso(estimate.fuelComponent)} + Service ${formatPeso(estimate.serviceFee)}`;
-  if (fareBreakdownDetail) fareBreakdownDetail.textContent = `Fuel markup multiplier: ${estimate.config?.fuelMarkupMultiplier || estimate.config?.fuel_markup_multiplier || 1.15}x \u2014 Pickup distance multiplier: ${estimate.config?.pickupMultiplier || estimate.config?.pickup_multiplier || 0.5}x`;
+  if (fareBreakdownText) fareBreakdownText.textContent = `Base ${formatPeso(estimate.baseFare)} + Distance ${formatPeso(estimate.distanceFee)} + Fuel ${formatPeso(estimate.fuelComponent)} + Weather ${formatPeso(estimate.weatherSurcharge || 0)} + Service ${formatPeso(estimate.serviceFee)}`;
+  if (fareBreakdownDetail) fareBreakdownDetail.textContent = `Fuel markup multiplier: ${estimate.config?.fuelMarkupMultiplier || estimate.config?.fuel_markup_multiplier || 1.15}x \u2014 Pickup distance multiplier: ${estimate.config?.pickupMultiplier || estimate.config?.pickup_multiplier || 0.5}x \u2014 Weather: ${estimate.weatherAdjustment?.label || "Unavailable"} at ${formatDecimal((estimate.weatherSurchargeRate || 0) * 100, 1)}%`;
   if (fareFuelText) fareFuelText.textContent = `${formatDecimal(estimate.litersUsed, 3)} L at ${formatPeso(estimate.fuelPricePerLiter)}/L`;
   if (fareFuelDetail) fareFuelDetail.textContent = `${vehicleLabel} efficiency: ${formatDecimal(estimate.kmPerLiter, 1)} km/L \u2014 Source: ${getPricingSourceLabel(estimate)}`;
   if (fareRouteText) fareRouteText.textContent = `${formatDecimal(estimate.routeKm, 2)} km total`;
@@ -1470,6 +1640,11 @@ function focusMapOnBrowserLocation({ animate = true, zoom = null, requireBounds 
 }
 
 function updateBrowserLocationMarker() {
+  if (state.viewMode !== "user") {
+    clearBrowserLocationMarker();
+    return;
+  }
+
   if (!state.browserLocation) {
     clearBrowserLocationMarker();
     return;
@@ -2129,7 +2304,7 @@ async function prepareDriverSuggestion() {
     routeTrafficText.textContent = "Route traffic: preview only until you accept a driver";
     updateOfferCard(
       "Finding the best driver",
-      `Ranking nearby ${state.selectedVehicleType === "car" ? "car" : "motorcycle"} drivers using route distance, traffic, route efficiency, rating, cancellation risk, and movement behavior. ETA is shown for understanding but not scored directly.`
+      ""
     );
 
     const ranking = state.usingPythonBackend
@@ -2145,6 +2320,8 @@ async function prepareDriverSuggestion() {
     state.suggestionCursor = 0;
     state.baselineNearestSuggestion = ranking.baselineCandidate;
     state.suggestionSearchRadiusMeters = ranking.radiusMeters;
+    syncBaselineDriverMarker();
+    updateMapLegend();
     if (MATCH_DEBUG_ENABLED) {
       for (const candidate of ranking.rankedCandidates || []) {
         console.debug(`Driver ${candidate.driver?.id} intelligent-match debug`, candidate.debug || {});
@@ -2843,23 +3020,14 @@ function updateSuggestedDriverInfoLegacy(driver, pickupPath, tripPath) {
 
 function updateSuggestedDriverInfo(offer) {
   const { driver, tripPath, pickupDistanceMeters, pickupEtaMinutes, tripEtaMinutes } = offer;
-  const offerModePrefix = offer.matchingMode === "browser_fallback"
-    ? "Browser fallback mode. "
-    : "";
-  const environmentFlags = [];
-  if (offer.trafficSource === "heuristic_fallback") {
-    environmentFlags.push("traffic fallback active");
-  }
-  const environmentSuffix = environmentFlags.length
-    ? ` ${environmentFlags.join(", ")}.`
-    : "";
-  bestDriverText.textContent = `Driver ${driver.id} (${driver.type === "car" ? "car" : "motorcycle"})`;
+  const driverTypeLabel = driver.type === "car" ? "Car" : "Motorcycle";
+  bestDriverText.textContent = `${driverTypeLabel} driver ${driver.id} is ready for review`;
   driverTrafficText.textContent = `ETA ${pickupEtaMinutes} min | ${(pickupDistanceMeters / 1000).toFixed(2)} km to pickup | rating ${driver.rating.toFixed(2)} | cancellation ${formatCancellationRisk(driver.cancellationRate)}`;
   routeText.textContent = `Trip preview: ${(tripPath.distance / 1000).toFixed(2)} km, about ${tripEtaMinutes} min after pickup`;
   routeTrafficText.textContent = "Route traffic: preview only until you accept this driver";
   updateOfferCard(
-    `Driver ${driver.id} is ready for review`,
-    `${offerModePrefix}${driver.type === "car" ? "Car" : "Motorcycle"} match. ETA ${pickupEtaMinutes} min, ${(pickupDistanceMeters / 1000).toFixed(2)} km to pickup, ${(tripPath.distance / 1000).toFixed(2)} km after pickup.${environmentSuffix}`
+    `${driverTypeLabel} driver ${driver.id} is ready for review`,
+    ""
   );
   renderOfferMatchSummary(offer);
   setStatus(`Suggested Driver ${driver.id}. Review the driver profile before dispatch.`);
@@ -3616,8 +3784,12 @@ function summarizeDrivers() {
 
 function updateDriverSummary(targets = getDriverTargets()) {
   const counts = summarizeDrivers();
-  driverSummaryText.textContent = `${counts.active} active now: ${counts.availableStandby} standby, ${counts.availableMoving} repositioning, ${counts.assignedPickup} going to passenger, ${counts.assignedOnTrip} on-trip`;
-  driverBreakdownText.textContent = `Target now: ${targets.active} active. 60 cars, 40 motorcycles. Green = available, orange = going to passenger, red = on-trip, yellow = suggested or matched to you, speed adjusts with TomTom traffic and weather.`;
+  if (driverSummaryText) {
+    driverSummaryText.textContent = `${counts.active} active now: ${counts.availableStandby} standby, ${counts.availableMoving} repositioning, ${counts.assignedPickup} going to passenger, ${counts.assignedOnTrip} on-trip`;
+  }
+  if (driverBreakdownText) {
+    driverBreakdownText.textContent = `Target now: ${targets.active} active. 60 cars, 40 motorcycles.`;
+  }
   updateMapLegend();
 }
 
@@ -3998,12 +4170,49 @@ function getDriverMarkerStyle(status, type, isSelected = false) {
   };
 }
 
+function getBaselineDriverMarkerStyle(driver) {
+  const isCar = driver?.type === "car";
+  return {
+    radius: isCar ? 11 : 9,
+    color: "#2563eb",
+    weight: 3,
+    opacity: 0.95,
+    fillColor: "#ffffff",
+    fillOpacity: 0.08,
+    dashArray: "5 3"
+  };
+}
+
+function removeBaselineDriverMarker() {
+  if (!state.baselineDriverMarker) {
+    return;
+  }
+
+  markerLayer.removeLayer(state.baselineDriverMarker);
+  state.baselineDriverMarker = null;
+}
+
+function syncBaselineDriverMarker() {
+  removeBaselineDriverMarker();
+}
+
+function buildBaselineDriverPopup(driver) {
+  const baselineDistanceMeters = state.baselineNearestSuggestion?.directDistanceMeters;
+  const baselineDistanceText = typeof baselineDistanceMeters === "number"
+    ? `${(baselineDistanceMeters / 1000).toFixed(2)} km straight-line`
+    : "Distance unavailable";
+  return `<strong>Baseline driver</strong><br>Driver ${driver.id}<br>${baselineDistanceText}`;
+}
+
 function updateDriverMarker(driver) {
   driver.marker.setLatLng([driver.lat, driver.lng]);
   driver.marker.setStyle(getDriverMarkerStyle(driver.status, driver.type, driver.id === state.selectedDriverId));
   driver.marker.setPopupContent(buildDriverPopup(driver));
   if (state.viewMode === "user" && driver.id !== state.selectedDriverId) {
     driver.marker.closePopup();
+  }
+  if (state.baselineNearestSuggestion?.driverId === driver.id) {
+    syncBaselineDriverMarker();
   }
 }
 
@@ -4020,11 +4229,14 @@ function buildDriverPopup(driver) {
   const selectedText = driver.id === state.selectedDriverId
     ? `<br>${driver.lockedToUser ? "Matched to you" : "Suggested to you"}`
     : "";
+  const baselineText = driver.id === state.baselineNearestSuggestion?.driverId
+    ? "<br>Baseline driver (straight-line nearest)"
+    : "";
   const landmarkText = landmark ? `<br>Target: ${landmark.name}` : "";
   const movementSpeedText = state.viewMode === "admin"
     ? `<br>Movement speed: ${formatDriverMovementSpeed(driver)}`
     : "";
-  return `<strong>Driver ${driver.id}</strong><br>${driver.type === "car" ? "Car" : "Motorcycle"}<br>${stateLabelMap[driver.status] || driver.status}${selectedText}${landmarkText}${movementSpeedText}`;
+  return `<strong>Driver ${driver.id}</strong><br>${driver.type === "car" ? "Car" : "Motorcycle"}<br>${stateLabelMap[driver.status] || driver.status}${selectedText}${baselineText}${landmarkText}${movementSpeedText}`;
 }
 
 function formatDriverMovementSpeed(driver) {
@@ -4167,7 +4379,9 @@ function renderClock() {
     timeStyle: "medium"
   });
 
-  timeText.textContent = formatter.format(new Date());
+  if (timeText) {
+    timeText.textContent = formatter.format(new Date());
+  }
 }
 
 async function loadWeather(boundary) {
@@ -4190,6 +4404,7 @@ async function loadWeather(boundary) {
       state.weatherContext = {
         label: "Weather unavailable right now.",
         multiplier: 1,
+        raw: null,
         source: "weather_fallback",
         notice: "Weather source: fallback because live weather was unavailable."
       };
@@ -4226,12 +4441,15 @@ async function loadWeather(boundary) {
 
     const weatherLabel = describeWeatherCode(current.weather_code, current.is_day);
     state.weatherContext = buildWeatherContext(current, weatherLabel);
-    weatherText.textContent = `${weatherLabel}, ${Math.round(current.temperature_2m)} deg C, feels like ${Math.round(current.apparent_temperature)} deg C, wind ${Math.round(current.wind_speed_10m)} km/h`;
+    if (weatherText) {
+      weatherText.textContent = `${weatherLabel}, ${Math.round(current.temperature_2m)} deg C, feels like ${Math.round(current.apparent_temperature)} deg C, wind ${Math.round(current.wind_speed_10m)} km/h`;
+    }
   } catch (error) {
     console.error(error);
     state.weatherContext = {
       label: "Weather unavailable right now.",
       multiplier: 1,
+      raw: null,
       source: "weather_fallback",
       notice: "Weather source: fallback because live weather was unavailable."
     };
@@ -4244,6 +4462,7 @@ function applyWeatherPayload(payload) {
     state.weatherContext = {
       label: payload?.summary || "Weather unavailable right now.",
       multiplier: 1,
+      raw: null,
       source: payload?.source || "weather_fallback",
       notice: payload?.source === "open_meteo_live"
         ? "Weather source: Open-Meteo live weather."
@@ -4282,6 +4501,7 @@ function buildWeatherContext(current, weatherLabel, source = "open_meteo_live") 
   return {
     label: weatherLabel,
     multiplier,
+    raw: current,
     source,
     notice: source === "open_meteo_live"
       ? "Weather source: Open-Meteo live weather."
@@ -4290,7 +4510,9 @@ function buildWeatherContext(current, weatherLabel, source = "open_meteo_live") 
 }
 
 function setWeatherText(message) {
-  weatherText.textContent = message;
+  if (weatherText) {
+    weatherText.textContent = message;
+  }
 }
 
 async function refreshMovingDriverTrafficContexts() {
@@ -4408,26 +4630,34 @@ async function loadTrafficForPoint(pointLabel, node) {
       : driverTrafficText;
 
   if (!node) {
+    applyTrafficSourceTone(target);
     target.textContent = "Traffic: unavailable for this point";
     return;
   }
 
+  applyTrafficSourceTone(target);
   target.textContent = "Traffic: loading...";
 
   try {
     const result = await fetchTrafficForNode(node, TRAFFIC_POINT_NEARBY_CANDIDATES);
     if (!result?.traffic) {
-      target.textContent = result?.notice || "Traffic: unavailable near this road right now";
+      applyTrafficSourceTone(target, result?.source || "");
+      target.textContent = result?.source === "heuristic_fallback"
+        ? "Traffic: estimated conditions near this road right now"
+        : "Traffic: unavailable near this road right now";
       return;
     }
+    applyTrafficSourceTone(target, result?.source || "");
     target.textContent = formatTrafficLookupResult(result, node);
   } catch (error) {
     console.error(error);
+    applyTrafficSourceTone(target);
     target.textContent = `Traffic: ${error.message || "unavailable for this point"}`;
   }
 }
 
 async function loadRouteTrafficSummary(nodeIds, movementDriver = null, routeDistanceMeters = null) {
+  applyTrafficSourceTone(routeTrafficText);
   routeTrafficText.textContent = "Route traffic: loading...";
   const routeKey = nodeIds.join("|");
 
@@ -4437,6 +4667,7 @@ async function loadRouteTrafficSummary(nodeIds, movementDriver = null, routeDist
     .filter(Boolean);
 
   if (!sampleNodes.length) {
+    applyTrafficSourceTone(routeTrafficText);
     routeTrafficText.textContent = "Route traffic: unavailable near this route right now";
     applyHeuristicMovementTraffic(movementDriver, routeDistanceMeters, routeKey, getDriverCurrentSegmentKey(movementDriver));
     return;
@@ -4456,8 +4687,8 @@ async function loadRouteTrafficSummary(nodeIds, movementDriver = null, routeDist
     .map((result) => result.traffic);
 
   if (!validSamples.length) {
-    const fallbackNotice = results.find((result) => result?.notice)?.notice || "Route traffic: unavailable near this route right now";
-    routeTrafficText.textContent = fallbackNotice.replace(/^Traffic source:/, "Route traffic:");
+    applyTrafficSourceTone(routeTrafficText, "heuristic_fallback");
+    routeTrafficText.textContent = "Route traffic: estimated conditions right now";
     applyHeuristicMovementTraffic(movementDriver, routeDistanceMeters, routeKey, getDriverCurrentSegmentKey(movementDriver));
     return;
   }
@@ -4469,7 +4700,8 @@ async function loadRouteTrafficSummary(nodeIds, movementDriver = null, routeDist
 
   const failedSamples = results.length - validSamples.length;
   const failureSuffix = failedSamples ? `, ${failedSamples} sample(s) failed` : "";
-  routeTrafficText.textContent = `Route traffic: ${describeTrafficRatio(averageRatio)} from ${validSamples.length} live road samples${failureSuffix}. Source: TomTom live traffic.`;
+  applyTrafficSourceTone(routeTrafficText, "tomtom_live");
+  routeTrafficText.textContent = `Route traffic: ${describeTrafficRatio(averageRatio)} from ${validSamples.length} live road samples${failureSuffix}.`;
   applyLiveMovementTraffic(movementDriver, averageRatio, routeKey, getDriverCurrentSegmentKey(movementDriver));
 }
 
@@ -4623,20 +4855,28 @@ function formatTrafficSummary(traffic) {
   return `Traffic: ${traffic.currentSpeed}/${traffic.freeFlowSpeed} km/h, ${describeTrafficRatio(ratio)}, confidence ${Math.round((traffic.confidence || 0) * 100)}%`;
 }
 
+function applyTrafficSourceTone(element, source = "") {
+  if (!element) {
+    return;
+  }
+
+  element.classList.remove("traffic-source-live", "traffic-source-fallback");
+  if (source === "tomtom_live") {
+    element.classList.add("traffic-source-live");
+  } else if (source === "heuristic_fallback") {
+    element.classList.add("traffic-source-fallback");
+  }
+}
+
 function formatTrafficLookupResult(result, originNode) {
   const summary = formatTrafficSummary(result.traffic);
   const matchedTarget = result.matchedNode || result.matchedPoint || null;
-  const sourceSuffix = result?.source === "tomtom_live"
-    ? " Source: TomTom live traffic."
-    : result?.notice
-      ? ` ${result.notice}`
-      : "";
   if (!matchedTarget || result.matchedNode?.id === originNode.id) {
-    return `${summary}.${sourceSuffix}`.replace(/\.\s+\./g, ". ");
+    return summary;
   }
 
   const fallbackDistance = haversineDistance(originNode, matchedTarget);
-  return `${summary}, nearby segment ${Math.round(fallbackDistance)} m away.${sourceSuffix}`.replace(/\.\s+\./g, ". ");
+  return `${summary}, nearby segment ${Math.round(fallbackDistance)} m away.`;
 }
 
 function isRetryableTrafficError(error) {
@@ -4806,8 +5046,8 @@ function createHeatmapSliderControl() {
     slider.addEventListener("change", async function () {
       const hour = parseInt(this.value, 10);
       state.heatmapHour = hour;
-      const points = await fetchHeatmapData(hour);
-      if (points) renderHeatmapLayer(points);
+      const result = await fetchHeatmapData(hour, getHeatmapRenderMode());
+      if (result?.points) renderHeatmapLayer(result.points, result.renderMode);
     });
 
     return container;
@@ -4847,28 +5087,69 @@ function showMapNotice(message) {
   }, 5000);
 }
 
+function getHeatmapHoverOverlay() {
+  if (state.heatmapHoverOverlay) {
+    return state.heatmapHoverOverlay;
+  }
+
+  const mapContainer = document.getElementById("map");
+  if (!mapContainer) {
+    return null;
+  }
+
+  const overlay = document.createElement("div");
+  overlay.className = "heatmap-hover-overlay";
+  overlay.hidden = true;
+  mapContainer.appendChild(overlay);
+  state.heatmapHoverOverlay = overlay;
+  return overlay;
+}
+
+function hideHeatmapHoverOverlay() {
+  if (state.heatmapHoverOverlay) {
+    state.heatmapHoverOverlay.hidden = true;
+  }
+}
+
 /**
  * Fetch heatmap data for a given hour from the backend API.
  * Caches responses in state.heatmapCache to avoid re-fetching.
- * Returns the points array on success, or null on failure.
+ * Returns the API payload on success, or null on failure.
  */
-async function fetchHeatmapData(hour) {
-  if (state.heatmapCache[hour]) {
-    return state.heatmapCache[hour];
+function getHeatmapRenderMode() {
+  return "raw";
+}
+
+function getHeatmapCacheKey(hour, renderMode) {
+  return `${hour}:${renderMode}`;
+}
+
+async function fetchHeatmapData(hour, renderMode = getHeatmapRenderMode()) {
+  const cacheKey = getHeatmapCacheKey(hour, renderMode);
+  if (state.heatmapCache[cacheKey]) {
+    updateHeatmapLegendMeta(state.heatmapCache[cacheKey]);
+    return state.heatmapCache[cacheKey];
   }
 
   try {
-    const response = await fetch(`/api/heatmap-data?hour=${hour}`);
+    const response = await fetch(`/api/heatmap-data?hour=${hour}&mode=${encodeURIComponent(renderMode)}`);
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
 
     const data = await response.json();
-    const points = data.points || [];
-    state.heatmapCache[hour] = points;
-    return points;
+    const payload = {
+      points: data.points || [],
+      totalBookings: data.totalBookings || 0,
+      datasetName: data.datasetName || "",
+      renderMode: data.renderMode || renderMode,
+    };
+    state.heatmapCache[cacheKey] = payload;
+    updateHeatmapLegendMeta(payload);
+    return payload;
   } catch (error) {
     console.error("Failed to fetch heatmap data:", error);
+    updateHeatmapLegendMeta({ datasetName: "Unavailable", totalBookings: 0 });
     showMapNotice("Data update failed");
     return null;
   }
@@ -4879,20 +5160,53 @@ async function fetchHeatmapData(hour) {
  * Points are expected as [{lat, lng, count}, ...] from the API.
  * Removes any existing heatmap layer first, then creates a new one.
  */
-function renderHeatmapLayer(points) {
+function getHeatmapLayerConfig(renderMode = getHeatmapRenderMode(), zoom = map.getZoom()) {
+  if (renderMode === "raw") {
+    if (zoom >= 18) {
+      return { radius: 78, blur: 72, minOpacity: 0.1, maxZoom: 19, weightScale: 0.16 };
+    }
+    if (zoom >= 17) {
+      return { radius: 64, blur: 58, minOpacity: 0.11, maxZoom: 19, weightScale: 0.18 };
+    }
+    if (zoom >= 16) {
+      return { radius: 52, blur: 46, minOpacity: 0.12, maxZoom: 19, weightScale: 0.2 };
+    }
+    if (zoom >= 15) {
+      return { radius: 42, blur: 36, minOpacity: 0.14, maxZoom: 19, weightScale: 0.22 };
+    }
+    return { radius: 34, blur: 30, minOpacity: 0.16, maxZoom: 19, weightScale: 0.24 };
+  }
+
+  if (zoom >= 17) {
+    return { radius: 32, blur: 28, minOpacity: 0.2, maxZoom: 19, weightScale: 1 };
+  }
+  if (zoom >= 15) {
+    return { radius: 26, blur: 22, minOpacity: 0.22, maxZoom: 19, weightScale: 1 };
+  }
+  return { radius: 20, blur: 18, minOpacity: 0.24, maxZoom: 19, weightScale: 1 };
+}
+
+function renderHeatmapLayer(points, renderMode = getHeatmapRenderMode()) {
   removeHeatmapLayer();
+  state.heatmapCurrentPoints = points || [];
 
   if (!points || points.length === 0) {
     showMapNotice("No bookings for this hour");
+    hideHeatmapHoverOverlay();
     return;
   }
 
-  const heatPoints = points.map(p => [p.lat, p.lng, p.count]);
+  const layerConfig = getHeatmapLayerConfig(renderMode);
+  const heatPoints = points.map((p) => {
+    const baseWeight = typeof p.count === "number" ? p.count : 1;
+    return [p.lat, p.lng, baseWeight * (layerConfig.weightScale || 1)];
+  });
 
   state.heatmapLayer = L.heatLayer(heatPoints, {
-    radius: 25,
-    blur: 15,
-    maxZoom: 17,
+    radius: layerConfig.radius,
+    blur: layerConfig.blur,
+    minOpacity: layerConfig.minOpacity,
+    maxZoom: layerConfig.maxZoom,
     gradient: HEATMAP_GRADIENT
   }).addTo(map);
 }
@@ -4905,6 +5219,8 @@ function removeHeatmapLayer() {
     map.removeLayer(state.heatmapLayer);
     state.heatmapLayer = null;
   }
+  state.heatmapCurrentPoints = [];
+  hideHeatmapHoverOverlay();
 }
 
 // ─── Heatmap Legend Control ──────────────────────────────────────────────────
@@ -4934,10 +5250,48 @@ function createHeatmapLegendControl() {
     gradientBar.style.height = "16px";
     gradientBar.style.borderRadius = "4px";
 
+    const datasetText = L.DomUtil.create("div", "heatmap-legend-meta", container);
+    datasetText.textContent = "Dataset: loading...";
+
+    const bookingsText = L.DomUtil.create("div", "heatmap-legend-meta", container);
+    bookingsText.textContent = "Hour bookings: --";
+
+    state.heatmapDatasetText = datasetText;
+    state.heatmapBookingsText = bookingsText;
+    updateHeatmapLegendMeta(state.heatmapMeta);
+
     return container;
   };
 
   return control;
+}
+
+function updateHeatmapLegendMeta(meta = {}) {
+  state.heatmapMeta = {
+    datasetName: meta.datasetName || state.heatmapMeta.datasetName || "",
+    totalBookings: typeof meta.totalBookings === "number" ? meta.totalBookings : (state.heatmapMeta.totalBookings || 0),
+    renderMode: meta.renderMode || state.heatmapMeta.renderMode || "aggregated",
+  };
+
+  if (state.heatmapDatasetText) {
+    const modeLabel = state.heatmapMeta.renderMode === "raw" ? "Forecast surface" : "Aggregated forecast";
+    state.heatmapDatasetText.textContent = `Dataset: ${state.heatmapMeta.datasetName || "loading..."} | View: ${modeLabel}`;
+  }
+  if (state.heatmapBookingsText) {
+    state.heatmapBookingsText.textContent = `Hour bookings: ${Number(state.heatmapMeta.totalBookings || 0).toLocaleString()}`;
+  }
+}
+
+async function refreshHeatmapForCurrentView() {
+  if (!state.heatmapView) {
+    return;
+  }
+
+  const renderMode = getHeatmapRenderMode();
+  const result = await fetchHeatmapData(state.heatmapHour, renderMode);
+  if (result?.points) {
+    renderHeatmapLayer(result.points, result.renderMode);
+  }
 }
 
 // ─── Heatmap View Toggle (Admin Navigation) ─────────────────────────────────
@@ -4962,6 +5316,8 @@ function toggleHeatmapView() {
  */
 async function activateHeatmapView() {
   state.heatmapView = true;
+  state.heatmapCache = {};
+  removeBaselineDriverMarker();
 
   // Update nav button to indicate active state
   if (heatmapNavBtn) {
@@ -4995,9 +5351,9 @@ async function activateHeatmapView() {
 
   // Fetch and render heatmap data for the current hour
   try {
-    const points = await fetchHeatmapData(state.heatmapHour);
-    if (points) {
-      renderHeatmapLayer(points);
+    const result = await fetchHeatmapData(state.heatmapHour, getHeatmapRenderMode());
+    if (result?.points) {
+      renderHeatmapLayer(result.points, result.renderMode);
     }
   } catch (error) {
     console.error("Failed to load heatmap data on activation:", error);
@@ -5043,6 +5399,8 @@ function deactivateHeatmapView() {
   if (!map.hasLayer(driverLayer)) {
     driverLayer.addTo(map);
   }
+
+  syncBaselineDriverMarker();
 
   // Restore the default map legend
   if (mapLegendControl && mapLegendControl._container) {
