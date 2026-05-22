@@ -1152,11 +1152,15 @@ class AppHandler(BaseHTTPRequestHandler):
     def handle_pricing_estimate(self, body: dict[str, Any]) -> None:
         try:
             fuel = FUEL_PRICE_PROVIDER.get_current_price()
+            hour_val = body.get("hourOfDay")
+            hour_of_day = int(hour_val) if hour_val is not None else None
+            
             estimate = calculate_fare(
                 vehicle_type=str(body.get("vehicleType", "motorcycle")),
                 pickup_distance_meters=float(body.get("pickupDistanceMeters", 0) or 0),
                 trip_distance_meters=float(body.get("tripDistanceMeters", 0) or 0),
                 fuel_price_per_liter=float(fuel["pricePerLiter"]),
+                hour_of_day=hour_of_day,
             )
             estimate["fuelPrice"] = fuel
             estimate["sourceNote"] = (

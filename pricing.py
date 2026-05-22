@@ -24,6 +24,8 @@ class PricingConfig:
     car_rate_per_km: float = 18.0
     service_fee: float = 10.0
     fuel_markup_multiplier: float = 1.15
+    pickup_multiplier: float = 0.5
+    night_surge_multiplier: float = 1.5
     minimum_motorcycle_fare: float = 55.0
     minimum_car_fare: float = 85.0
 
@@ -125,10 +127,15 @@ def calculate_fare(
     pickup_distance_meters: float,
     trip_distance_meters: float,
     fuel_price_per_liter: float,
+    hour_of_day: int | None = None,
     config: PricingConfig | None = None,
 ) -> dict[str, Any]:
     config = config or PricingConfig()
-    route_km = max(0.0, (pickup_distance_meters + trip_distance_meters) / 1000)
+    pickup_km = max(0.0, pickup_distance_meters / 1000)
+    trip_km = max(0.0, trip_distance_meters / 1000)
+    route_km = pickup_km + trip_km
+    billed_route_km = (pickup_km * config.pickup_multiplier) + trip_km
+
     vehicle = vehicle_type if vehicle_type == "car" else "motorcycle"
 
     if vehicle == "car":
@@ -142,18 +149,31 @@ def calculate_fare(
         rate_per_km = config.motorcycle_rate_per_km
         minimum_fare = config.minimum_motorcycle_fare
 
+    is_night_surge = False
+    if hour_of_day is not None and (hour_of_day >= 22 or hour_of_day < 5):
+        is_night_surge = True
+        base_fare *= config.night_surge_multiplier
+        minimum_fare *= config.night_surge_multiplier
+
+    # Actual fuel consumed uses the real physical route
     liters_used = route_km / max(km_per_liter, 1)
-    fuel_cost = liters_used * fuel_price_per_liter
-    distance_fee = route_km * rate_per_km
+    
+    # Billing uses the discounted billed route
+    billed_liters = billed_route_km / max(km_per_liter, 1)
+    fuel_cost = billed_liters * fuel_price_per_liter
+    distance_fee = billed_route_km * rate_per_km
+    
     fuel_component = fuel_cost * config.fuel_markup_multiplier
     subtotal = base_fare + distance_fee + fuel_component + config.service_fee
     total = max(minimum_fare, subtotal)
 
     return {
+        "isNightSurge": is_night_surge,
         "vehicleType": vehicle,
         "routeKm": round(route_km, 2),
-        "pickupKm": round(max(0.0, pickup_distance_meters / 1000), 2),
-        "tripKm": round(max(0.0, trip_distance_meters / 1000), 2),
+        "billedRouteKm": round(billed_route_km, 2),
+        "pickupKm": round(pickup_km, 2),
+        "tripKm": round(trip_km, 2),
         "kmPerLiter": km_per_liter,
         "fuelPricePerLiter": round(fuel_price_per_liter, 2),
         "litersUsed": round(liters_used, 3),

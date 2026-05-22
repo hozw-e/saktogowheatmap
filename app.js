@@ -32,6 +32,8 @@ const PRICING_FALLBACK_CONFIG = {
   carRatePerKm: 18,
   serviceFee: 10,
   fuelMarkupMultiplier: 1.15,
+  pickupMultiplier: 0.5,
+  nightSurgeMultiplier: 1.5,
   minimumMotorcycleFare: 55,
   minimumCarFare: 85
 };
@@ -88,8 +90,14 @@ const offerDetailText = document.getElementById("offer-detail-text");
 const matcherSourceRow = document.getElementById("matcher-source-row");
 const offerScoreText = document.getElementById("offer-score-text");
 const offerEtaText = document.getElementById("offer-eta-text");
-const offerFareText = document.getElementById("offer-fare-text");
-const offerFuelText = document.getElementById("offer-fuel-text");
+const fareTotalText = document.getElementById("fare-total-text");
+const fareVehicleText = document.getElementById("fare-vehicle-text");
+const fareBreakdownText = document.getElementById("fare-breakdown-text");
+const fareBreakdownDetail = document.getElementById("fare-breakdown-detail");
+const fareFuelText = document.getElementById("fare-fuel-text");
+const fareFuelDetail = document.getElementById("fare-fuel-detail");
+const fareRouteText = document.getElementById("fare-route-text");
+const fareRouteDetail = document.getElementById("fare-route-detail");
 const offerBaselineText = document.getElementById("offer-baseline-text");
 const offerBaselineDistanceText = document.getElementById("offer-baseline-distance-text");
 const offerReasonList = document.getElementById("offer-reason-list");
@@ -110,7 +118,7 @@ const stepReview = document.getElementById("step-review");
 const tabRequestBtn = document.getElementById("tab-request-btn");
 const tabDriverBtn = document.getElementById("tab-driver-btn");
 const tabTripBtn = document.getElementById("tab-trip-btn");
-const tabMoreBtn = document.getElementById("tab-more-btn");
+const tabFareBtn = document.getElementById("tab-fare-btn");
 const entryOverlay = document.getElementById("entry-overlay");
 const enterUserBtn = document.getElementById("enter-user-btn");
 const enterAdminBtn = document.getElementById("enter-admin-btn");
@@ -222,7 +230,7 @@ enterAdminBtn.addEventListener("click", () => setEntryMode("admin"));
 tabRequestBtn.addEventListener("click", () => setUserPanelTab("request"));
 tabDriverBtn.addEventListener("click", () => setUserPanelTab("driver"));
 tabTripBtn.addEventListener("click", () => setUserPanelTab("trip"));
-tabMoreBtn.addEventListener("click", () => setUserPanelTab("more"));
+if (tabFareBtn) tabFareBtn.addEventListener("click", () => setUserPanelTab("fare"));
 if (heatmapNavBtn) heatmapNavBtn.addEventListener("click", () => toggleHeatmapView());
 if (adminPricingDetailsBtn) adminPricingDetailsBtn.addEventListener("click", () => togglePricingDetailsPanel());
 
@@ -633,8 +641,7 @@ function updateOfferCard(title, detail) {
 function clearOfferMatchSummary() {
   if (offerScoreText) offerScoreText.textContent = "--";
   if (offerEtaText) offerEtaText.textContent = "--";
-  if (offerFareText) offerFareText.textContent = "--";
-  if (offerFuelText) offerFuelText.textContent = "--";
+
   if (offerBaselineText) offerBaselineText.textContent = "--";
   if (offerBaselineDistanceText) offerBaselineDistanceText.textContent = "--";
   if (matcherSourceRow) {
@@ -659,23 +666,9 @@ function renderOfferMatchSummary(offer) {
     ? `${(baseline.directDistanceMeters / 1000).toFixed(2)} km straight-line`
     : `${(state.suggestionSearchRadiusMeters / 1000).toFixed(1)} km service range`;
 
-  const pricing = offer.pricingEstimate || null;
-  const pricingLoading = Boolean(offer.pricingLoading);
-  const fareText = pricingLoading
-    ? "Calculating..."
-    : pricing
-      ? formatPeso(pricing.totalFare)
-      : "--";
-  const fuelText = pricingLoading
-    ? "Calculating..."
-    : pricing
-      ? `${formatDecimal(pricing.litersUsed, 3)} L`
-      : "--";
-
   if (offerScoreText) offerScoreText.textContent = scoreText;
   if (offerEtaText) offerEtaText.textContent = etaText;
-  if (offerFareText) offerFareText.textContent = fareText;
-  if (offerFuelText) offerFuelText.textContent = fuelText;
+  updateFareTab(offer.pricingEstimate, Boolean(offer.pricingLoading));
   if (offerBaselineText) offerBaselineText.textContent = baselineDriverText;
   if (offerBaselineDistanceText) offerBaselineDistanceText.textContent = baselineDistanceText;
   renderMatcherSourceBadges(offer);
@@ -818,7 +811,8 @@ function buildPricingRequest(offer) {
   return {
     vehicleType: offer?.driver?.type || state.selectedVehicleType || "motorcycle",
     pickupDistanceMeters: Number(offer?.pickupDistanceMeters || 0),
-    tripDistanceMeters: Number(offer?.tripPath?.distance || 0)
+    tripDistanceMeters: Number(offer?.tripPath?.distance || 0),
+    hourOfDay: getCurrentManilaHour()
   };
 }
 
@@ -858,20 +852,36 @@ function buildFallbackPricingEstimate(offer, request = buildPricingRequest(offer
   const pickupKm = Math.max(0, request.pickupDistanceMeters / 1000);
   const tripKm = Math.max(0, request.tripDistanceMeters / 1000);
   const routeKm = pickupKm + tripKm;
+  const billedRouteKm = (pickupKm * (config.pickupMultiplier || 0.5)) + tripKm;
   const isCar = vehicleType === "car";
   const kmPerLiter = isCar ? config.carKmPerLiter : config.motorcycleKmPerLiter;
-  const baseFare = isCar ? config.carBaseFare : config.motorcycleBaseFare;
+  let baseFare = isCar ? config.carBaseFare : config.motorcycleBaseFare;
   const ratePerKm = isCar ? config.carRatePerKm : config.motorcycleRatePerKm;
-  const minimumFare = isCar ? config.minimumCarFare : config.minimumMotorcycleFare;
+  let minimumFare = isCar ? config.minimumCarFare : config.minimumMotorcycleFare;
+  
+  let isNightSurge = false;
+  const hourOfDay = request.hourOfDay ?? getCurrentManilaHour();
+  if (hourOfDay >= 22 || hourOfDay < 5) {
+    isNightSurge = true;
+    baseFare *= (config.nightSurgeMultiplier || 1.5);
+    minimumFare *= (config.nightSurgeMultiplier || 1.5);
+  }
+  
+  // Actual fuel consumed uses the real physical route
   const litersUsed = routeKm / Math.max(kmPerLiter, 1);
-  const fuelCost = litersUsed * DEFAULT_FUEL_PRICE_PER_LITER;
+  
+  // Billing uses the discounted billed route
+  const billedLiters = billedRouteKm / Math.max(kmPerLiter, 1);
+  const fuelCost = billedLiters * DEFAULT_FUEL_PRICE_PER_LITER;
   const fuelComponent = fuelCost * config.fuelMarkupMultiplier;
-  const distanceFee = routeKm * ratePerKm;
+  const distanceFee = billedRouteKm * ratePerKm;
   const totalFare = Math.max(minimumFare, baseFare + distanceFee + fuelComponent + config.serviceFee);
 
   return {
+    isNightSurge,
     vehicleType,
     routeKm: roundTo(routeKm, 2),
+    billedRouteKm: roundTo(billedRouteKm, 2),
     pickupKm: roundTo(pickupKm, 2),
     tripKm: roundTo(tripKm, 2),
     kmPerLiter,
@@ -992,8 +1002,9 @@ function updatePricingDetailsPanel(estimate, options = {}) {
   const vehicleLabel = estimate.vehicleType === "car" ? "Car" : "Motorcycle";
   const fuelSource = getPricingSourceLabel(estimate);
   const sourceNote = estimate.sourceNote || estimate.fuelPrice?.note || "";
-  pricingDetailsTitle.textContent = `${vehicleLabel} fare: ${formatPeso(estimate.totalFare)}`;
-  pricingDetailsText.textContent = `Route ${formatDecimal(estimate.routeKm, 2)} km: pickup ${formatDecimal(estimate.pickupKm, 2)} km plus trip ${formatDecimal(estimate.tripKm, 2)} km. Fuel ${formatDecimal(estimate.litersUsed, 3)} L at ${formatPeso(estimate.fuelPricePerLiter)}/L using ${formatDecimal(estimate.kmPerLiter, 1)} km/L. Fare parts: base ${formatPeso(estimate.baseFare)}, distance ${formatPeso(estimate.distanceFee)}, fuel ${formatPeso(estimate.fuelComponent)}, service ${formatPeso(estimate.serviceFee)}, minimum ${formatPeso(estimate.minimumFare)}. Source: ${fuelSource}${sourceNote ? `. ${sourceNote}` : ""}`;
+  const nightSurgeTag = estimate.isNightSurge ? " [NIGHT SURGE APPLIED 1.5x]" : "";
+  pricingDetailsTitle.textContent = `${vehicleLabel} fare: ${formatPeso(estimate.totalFare)}${nightSurgeTag}`;
+  pricingDetailsText.textContent = `Route ${formatDecimal(estimate.routeKm, 2)} km: pickup ${formatDecimal(estimate.pickupKm, 2)} km (billed at ${estimate.config?.pickupMultiplier || estimate.config?.pickup_multiplier || 0.5}x) plus trip ${formatDecimal(estimate.tripKm, 2)} km. Fuel ${formatDecimal(estimate.litersUsed, 3)} L at ${formatPeso(estimate.fuelPricePerLiter)}/L using ${formatDecimal(estimate.kmPerLiter, 1)} km/L. Fare parts: base ${formatPeso(estimate.baseFare)}, distance ${formatPeso(estimate.distanceFee)}, fuel ${formatPeso(estimate.fuelComponent)}, service ${formatPeso(estimate.serviceFee)}, minimum ${formatPeso(estimate.minimumFare)}. Source: ${fuelSource}${sourceNote ? `. ${sourceNote}` : ""}`;
 }
 
 function getPricingSourceLabel(estimate) {
@@ -1109,8 +1120,8 @@ function updateUserPanelTabs() {
   const tabMap = {
     request: tabRequestBtn,
     driver: tabDriverBtn,
-    trip: tabTripBtn,
-    more: tabMoreBtn
+    fare: tabFareBtn,
+    trip: tabTripBtn
   };
 
   for (const [tabName, button] of Object.entries(tabMap)) {
@@ -1120,6 +1131,43 @@ function updateUserPanelTabs() {
 
     button.classList.toggle("is-active", state.userPanelTab === tabName);
   }
+}
+
+function updateFareTab(estimate, isLoading) {
+  if (isLoading) {
+    if (fareTotalText) fareTotalText.textContent = "Calculating...";
+    if (fareVehicleText) fareVehicleText.textContent = "Fetching fare estimate from the pricing engine.";
+    if (fareBreakdownText) fareBreakdownText.textContent = "Calculating...";
+    if (fareBreakdownDetail) fareBreakdownDetail.textContent = "";
+    if (fareFuelText) fareFuelText.textContent = "Calculating...";
+    if (fareFuelDetail) fareFuelDetail.textContent = "";
+    if (fareRouteText) fareRouteText.textContent = "Calculating...";
+    if (fareRouteDetail) fareRouteDetail.textContent = "";
+    return;
+  }
+
+  if (!estimate) {
+    if (fareTotalText) fareTotalText.textContent = "--";
+    if (fareVehicleText) fareVehicleText.textContent = "Select pickup and drop-off to calculate fare.";
+    if (fareBreakdownText) fareBreakdownText.textContent = "--";
+    if (fareBreakdownDetail) fareBreakdownDetail.textContent = "Base fare, distance fee, fuel component, and service fee will appear here.";
+    if (fareFuelText) fareFuelText.textContent = "--";
+    if (fareFuelDetail) fareFuelDetail.textContent = "Fuel consumption and price per liter will appear here.";
+    if (fareRouteText) fareRouteText.textContent = "--";
+    if (fareRouteDetail) fareRouteDetail.textContent = "Pickup and trip distance breakdown will appear here.";
+    return;
+  }
+
+  const vehicleLabel = estimate.vehicleType === "car" ? "Car" : "Motorcycle";
+  const nightSurgeTag = estimate.isNightSurge ? " \u2014 Night Surge 1.5x Applied" : "";
+  if (fareTotalText) fareTotalText.textContent = formatPeso(estimate.totalFare);
+  if (fareVehicleText) fareVehicleText.textContent = `${vehicleLabel} ride \u2014 minimum fare ${formatPeso(estimate.minimumFare)}${nightSurgeTag}`;
+  if (fareBreakdownText) fareBreakdownText.textContent = `Base ${formatPeso(estimate.baseFare)} + Distance ${formatPeso(estimate.distanceFee)} + Fuel ${formatPeso(estimate.fuelComponent)} + Service ${formatPeso(estimate.serviceFee)}`;
+  if (fareBreakdownDetail) fareBreakdownDetail.textContent = `Fuel markup multiplier: ${estimate.config?.fuelMarkupMultiplier || estimate.config?.fuel_markup_multiplier || 1.15}x \u2014 Pickup distance multiplier: ${estimate.config?.pickupMultiplier || estimate.config?.pickup_multiplier || 0.5}x`;
+  if (fareFuelText) fareFuelText.textContent = `${formatDecimal(estimate.litersUsed, 3)} L at ${formatPeso(estimate.fuelPricePerLiter)}/L`;
+  if (fareFuelDetail) fareFuelDetail.textContent = `${vehicleLabel} efficiency: ${formatDecimal(estimate.kmPerLiter, 1)} km/L \u2014 Source: ${getPricingSourceLabel(estimate)}`;
+  if (fareRouteText) fareRouteText.textContent = `${formatDecimal(estimate.routeKm, 2)} km total`;
+  if (fareRouteDetail) fareRouteDetail.textContent = `Pickup ${formatDecimal(estimate.pickupKm, 2)} km (billed at ${estimate.config?.pickupMultiplier || estimate.config?.pickup_multiplier || 0.5}x) + Trip ${formatDecimal(estimate.tripKm, 2)} km = Billed ${formatDecimal(estimate.billedRouteKm, 2)} km`;
 }
 
 function updateFlowStepsUI({ hasPickup, hasDropoff, hasOffer, activeRide }) {

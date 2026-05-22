@@ -619,7 +619,7 @@ body.view-mode-user[data-user-panel="driver"] [data-mobile-section~="driver"] {
   display: block;
 }
 
-body.view-mode-user[data-user-panel="more"] [data-mobile-section~="more"] {
+body.view-mode-user[data-user-panel="fare"] [data-mobile-section~="fare"] {
   display: block;
 }
 
@@ -634,7 +634,7 @@ body.view-mode-user .stats {
 
 body.view-mode-user[data-user-panel="driver"] .stats,
 body.view-mode-user[data-user-panel="trip"] .stats,
-body.view-mode-user[data-user-panel="more"] .stats {
+body.view-mode-user[data-user-panel="fare"] .stats {
   display: grid;
   grid-template-columns: 1fr;
 }
@@ -649,7 +649,7 @@ body.view-mode-user .stat-card {
 
 body.view-mode-user[data-user-panel="driver"] .stat-card[data-mobile-tab~="driver"],
 body.view-mode-user[data-user-panel="trip"] .stat-card[data-mobile-tab~="trip"],
-body.view-mode-user[data-user-panel="more"] .stat-card[data-mobile-tab~="more"] {
+body.view-mode-user[data-user-panel="fare"] .stat-card[data-mobile-tab~="fare"] {
   display: block;
 }
 

@@ -47,8 +47,8 @@
       <nav class="mobile-panel-nav" aria-label="User panel sections">
         <button id="tab-request-btn" class="mobile-panel-tab is-active" type="button" data-user-panel-tab="request">Request</button>
         <button id="tab-driver-btn" class="mobile-panel-tab" type="button" data-user-panel-tab="driver">Driver</button>
+        <button id="tab-fare-btn" class="mobile-panel-tab" type="button" data-user-panel-tab="fare">Fare</button>
         <button id="tab-trip-btn" class="mobile-panel-tab" type="button" data-user-panel-tab="trip">Trip</button>
-        <button id="tab-more-btn" class="mobile-panel-tab" type="button" data-user-panel-tab="more">More</button>
       </nav>
 
       <!-- Intro copy removed per request; UI will present strict step flow -->
@@ -133,14 +133,6 @@
             <strong id="offer-eta-text">--</strong>
           </div>
           <div class="offer-summary__item">
-            <span class="offer-summary__label">Estimated fare</span>
-            <strong id="offer-fare-text">--</strong>
-          </div>
-          <div class="offer-summary__item">
-            <span class="offer-summary__label">Fuel used</span>
-            <strong id="offer-fuel-text">--</strong>
-          </div>
-          <div class="offer-summary__item">
             <span class="offer-summary__label">Baseline driver</span>
             <strong id="offer-baseline-text">--</strong>
           </div>
@@ -167,15 +159,15 @@
       </div>
 
       <div class="stats">
-        <div class="stat-card" data-mobile-tab="more">
+        <div class="stat-card" data-mobile-tab="trip">
           <span class="stat-card__label">Status</span>
           <strong id="status-text">Loading boundary and street network...</strong>
         </div>
-        <div class="stat-card" data-mobile-tab="more">
+        <div class="stat-card" data-mobile-tab="trip">
           <span class="stat-card__label">Olongapo Time</span>
           <strong id="time-text">Loading local time...</strong>
         </div>
-        <div class="stat-card" data-mobile-tab="more">
+        <div class="stat-card" data-mobile-tab="trip">
           <span class="stat-card__label">Current Weather</span>
           <strong id="weather-text">Loading weather...</strong>
         </div>
@@ -199,10 +191,28 @@
           <strong id="route-text">Waiting for pickup and drop-off</strong>
           <small id="route-traffic-text" class="detail-text">Route traffic: unavailable until a driver is accepted</small>
         </div>
-        <div class="stat-card" data-mobile-tab="more">
+        <div class="stat-card" data-mobile-tab="trip">
           <span class="stat-card__label">Driver Simulation</span>
           <strong id="driver-summary-text">Preparing 100 drivers...</strong>
           <small id="driver-breakdown-text" class="detail-text">60 cars, 40 motorcycles. Green = available, orange = going to passenger, red = on-trip, yellow = suggested or matched to you.</small>
+        </div>
+        <div class="stat-card" data-mobile-tab="fare">
+          <span class="stat-card__label">Total Fare</span>
+          <strong id="fare-total-text">--</strong>
+          <small id="fare-vehicle-text" class="detail-text">Select pickup and drop-off to calculate fare.</small>
+        </div>
+        <div class="stat-card" data-mobile-tab="fare">
+          <span class="stat-card__label">Breakdown</span>
+          <strong id="fare-breakdown-text">--</strong>
+          <small id="fare-breakdown-detail" class="detail-text" style="margin-bottom: 12px;">Base fare, distance fee, fuel component, and service fee will appear here.</small>
+          
+          <span class="stat-card__label">Fuel Details</span>
+          <strong id="fare-fuel-text">--</strong>
+          <small id="fare-fuel-detail" class="detail-text" style="margin-bottom: 12px;">Fuel consumption and price per liter will appear here.</small>
+          
+          <span class="stat-card__label">Route Distance</span>
+          <strong id="fare-route-text">--</strong>
+          <small id="fare-route-detail" class="detail-text">Pickup and trip distance breakdown will appear here.</small>
         </div>
       </div>
 
